@@ -1,0 +1,16 @@
+services:
+  orchestrail:
+    container_name: orchestrail
+    image: orchestrail:latest
+    environment:
+      - PORT=8080
+      - OLLAMA_MODEL=qwen3-coder-next:iq3
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+      - OPENAI_API_KEY=ollama
+      - DATA_DIR=/data
+    ports:
+      - '8089:8080'
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

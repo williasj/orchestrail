@@ -1,0 +1,39 @@
+name: Feature Request
+description: Suggest an improvement or new capability for Orchestrail
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome. Please describe what you want and why.
+        For significant changes, open a discussion first before submitting a PR.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case or limitation you are running into
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: What would you like Orchestrail to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any other approaches you considered or tried?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Does this feature require internet access or cloud services?
+      options:
+        - label: "No -- this can be implemented locally"
+        - label: "Yes -- but it should be optional and off by default"

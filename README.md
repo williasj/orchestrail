@@ -151,9 +151,7 @@ In Open WebUI, add a new connection:
 
 ## SOPHIA Integration
 
-When used alongside a SOPHIA deployment, Orchestrail agents can pull live
-sensor data from Home Assistant and publish run events to MQTT. Configure
-SOPHIA credentials in the admin UI under Tools.
+None yet but future state maybe!
 
 ---
 

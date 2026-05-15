@@ -26,8 +26,9 @@ of this software.
 ## Threat Model
 
 Orchestrail runs entirely on your local network and communicates only with
-locally-hosted services (Ollama, Qdrant, SOPHIA). It does not make outbound
-internet connections except where explicitly configured by the user.
+locally-hosted services (Ollama, Qdrant, and any other tools you configure).
+It does not make outbound internet connections except where explicitly
+configured by the user.
 
 The primary attack surface is:
 
@@ -40,5 +41,5 @@ The primary attack surface is:
 ## Upstream Dependencies
 
 Most attack surface in an Orchestrail deployment comes from upstream software:
-Ollama, Node.js, Express, and any SOPHIA services you have running. Report
+Ollama, Node.js, Express, and any tool services you have configured. Report
 vulnerabilities in those projects to their respective maintainers.

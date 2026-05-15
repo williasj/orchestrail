@@ -673,7 +673,7 @@ var editingAgentName = null;
 var editingToolId = null;
 
 var PROVIDER_DEFAULTS = {
-  local:     { url: 'http://10.20.0.27:11434/v1', key: 'ollama' },
+  local:     { url: 'http://host.docker.internal:11434/v1', key: 'ollama' },
   openai:    { url: 'https://api.openai.com/v1',  key: '' },
   anthropic: { url: 'https://api.anthropic.com/v1', key: '' },
   custom:    { url: '', key: '' },
@@ -1131,7 +1131,7 @@ function populateModelDropdown(provider, currentModel) {
 
   var models = [];
   if (provider === 'local') {
-    models = ollamaModels.length ? ollamaModels : (currentModel ? [currentModel] : ['qwen3-coder-next:iq3']);
+    models = ollamaModels.length ? ollamaModels : (currentModel ? [currentModel] : ['llama3.2']);
   } else if (provider === 'openai') {
     models = ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo'];
   } else if (provider === 'anthropic') {

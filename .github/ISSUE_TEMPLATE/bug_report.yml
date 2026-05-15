@@ -30,7 +30,7 @@ body:
     attributes:
       label: Ollama Model
       description: Model name and quantization (no endpoint URLs needed)
-      placeholder: "qwen3-coder-next:iq3"
+      placeholder: "llama3.2 / mistral:7b / qwen2.5-coder:7b"
     validations:
       required: true
 

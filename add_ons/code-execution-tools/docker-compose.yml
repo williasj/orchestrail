@@ -1,0 +1,42 @@
+services:
+  # Piston: multi-language sandboxed code execution engine
+  piston:
+    image: ghcr.io/engineer-man/piston
+    container_name: piston
+    restart: unless-stopped
+    # privileged is required for Piston's namespace + cgroup sandboxing
+    privileged: true
+    expose:
+      - "2000"   # internal only -- not exposed to the host
+    volumes:
+      # Installed language runtimes are stored here and survive restarts.
+      # Run install_packages.sh once after first deploy to populate this.
+      - piston-packages:/piston/packages
+    environment:
+      - PISTON_RUN_TIMEOUT=30000
+      - PISTON_COMPILE_TIMEOUT=10000
+      - PISTON_OUTPUT_MAX_SIZE=1048576
+
+  # FastAPI wrapper: exposes Piston as an OpenAI-compatible tools endpoint
+  code-exec-tools:
+    build: .
+    container_name: code-exec-tools
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - PISTON_URL=http://piston:2000
+      - RUN_TIMEOUT_MS=30000
+      - COMPILE_TIMEOUT_MS=10000
+    depends_on:
+      - piston
+
+volumes:
+  piston-packages:
+    # Named volume -- runtimes persist across restarts.
+    # To use a host path instead (e.g. on TrueNAS), replace with:
+    #   driver: local
+    #   driver_opts:
+    #     type: none
+    #     o: bind
+    #     device: /your/host/path/piston-packages

@@ -1,10 +1,10 @@
 services:
   orchestrail:
     container_name: orchestrail
-    image: orchestrail:latest
+    build: .
     environment:
       - PORT=8080
-      - OLLAMA_MODEL=qwen3-coder-next:iq3
+      - OLLAMA_MODEL=llama3.2
       - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
       - OPENAI_BASE_URL=http://host.docker.internal:11434/v1
       - OPENAI_API_KEY=ollama

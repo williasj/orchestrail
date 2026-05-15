@@ -15,7 +15,7 @@ RUN npm run build
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-ENV OLLAMA_MODEL=qwen3-coder-next:iq3
+ENV OLLAMA_MODEL=llama3.2
 
 EXPOSE 8080
 

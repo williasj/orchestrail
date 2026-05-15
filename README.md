@@ -116,7 +116,7 @@ All configuration is via environment variables:
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP server port |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434/v1` | Ollama API base URL |
-| `OLLAMA_MODEL` | `qwen3-coder-next:iq3` | Default model for agents |
+| `OLLAMA_MODEL` | `llama3.2` | Default model for agents |
 | `OPENAI_API_KEY` | `ollama` | API key (set to `ollama` for local) |
 | `DATA_DIR` | `/data` | Persistent data directory for agent/tool config |
 
@@ -149,9 +149,35 @@ In Open WebUI, add a new connection:
 
 ---
 
-## SOPHIA Integration
+## Add-ons
 
+<<<<<<< HEAD
 None yet but future state maybe!
+=======
+Optional add-ons live in the `add_ons/` directory. Each is self-contained
+with its own `docker-compose.yml` and `README.md`.
+
+| Add-on | Description | Port |
+|--------|-------------|------|
+| [code-execution-tools](add_ons/code-execution-tools/README.md) | Sandboxed multi-language code execution via [Piston](https://github.com/engineer-man/piston). Provides `run_code` and `list_runtimes` tools to agents. | 8765 |
+
+To enable an add-on, start it separately and register its URL in the
+Orchestrail admin UI under **Tools**:
+
+```bash
+cd add_ons/code-execution-tools
+docker compose up -d
+bash install_packages.sh   # first time only
+```
+
+---
+
+## Home Automation Integration
+
+Orchestrail agents can pull live sensor data from Home Assistant and publish
+run events to MQTT. Configure Home Assistant credentials and MQTT broker
+details in the admin UI under Tools.
+>>>>>>> 43005a1 (Add code-execution-tools add-on; sanitize hardcoded IPs and model defaults)
 
 ---
 

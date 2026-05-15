@@ -36,7 +36,7 @@ Good candidates for contribution:
 - New built-in agent roles or synthesizer strategies
 - Improvements to the workbench, tool system, or pipeline stage model
 - Documentation improvements and usage examples
-- SOPHIA integration enhancements (MQTT, Appliance Registry, WebUI)
+- Home automation integration enhancements (MQTT, Home Assistant, WebUI)
 
 Please open an issue before starting work on a significant new feature so we
 can discuss whether it fits the project's direction before you invest time in

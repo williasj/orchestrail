@@ -24,7 +24,7 @@ app.use(express.json({ limit: '10mb' }))
 
 export interface AgentLLM {
   provider: 'local' | 'openai' | 'anthropic' | 'custom'
-  url: string       // base URL (e.g. http://10.20.0.27:11434/v1)
+  url: string       // base URL (e.g. http://localhost:11434/v1)
   apiKey: string    // Bearer key
   model: string
 }
@@ -266,8 +266,8 @@ const DEFAULT_TOOLS: ToolConfig[] = [
     type: 'qdrant_rag',
     enabled: false,
     config: {
-      url: 'http://10.20.0.27:6333',
-      embeddingUrl: 'http://10.20.0.27:8764',
+      url: 'http://localhost:6333',
+      embeddingUrl: 'http://localhost:8764',
     },
   },
 ]
@@ -2292,7 +2292,7 @@ app.get('/api/ollama/models', async (_req, res) => {
 app.get('/api/qdrant/collections', async (req: Request, res: Response) => {
   const toolId  = req.query['toolId'] as string || 'qdrant-rag'
   const tool    = TOOLS.find(t => t.id === toolId && t.type === 'qdrant_rag')
-  const baseUrl = tool?.config?.['url'] || 'http://10.20.0.27:6333'
+  const baseUrl = tool?.config?.['url'] || 'http://localhost:6333'
   try {
     const r    = await fetch(`${baseUrl}/collections`)
     const data = await r.json() as { result?: { collections?: { name: string }[] } }

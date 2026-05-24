@@ -46,7 +46,7 @@ export interface TeamAgent {
 export interface ToolConfig {
   id: string
   name: string
-  type: 'qdrant_rag' | 'openai_tools'
+  type: 'qdrant_rag' | 'openai_tools' | 'rag_manager'
   enabled: boolean
   config: Record<string, string>
 }
@@ -129,6 +129,23 @@ function wbSet(slot: string, content: string): void {
 }
 function wbList(): string[] { return Array.from(workbenchStore.get(wbId())?.keys() ?? []) }
 function wbClear(id: string): void { workbenchStore.delete(id) }
+
+// -- RAG Manager (HTTP RAG proxy) ---------------------------------------------
+
+interface RagManagerEndpoint {
+  operationId: string
+  summary:     string
+  description: string
+  path:        string
+}
+
+interface RagManagerSpec {
+  baseUrl:   string
+  endpoints: RagManagerEndpoint[]
+}
+
+const ragManagerCache     = new Map<string, { spec: RagManagerSpec; ts: number }>()
+const RAG_MANAGER_CACHE_TTL = 5 * 60 * 1000  // 5 minutes
 
 // -- Memory (Qdrant + TEI) ---------------------------------------------------
 
@@ -788,6 +805,32 @@ async function callCoordinatorLLM(messages: ChatMessage[], maxTokens = 2048): Pr
 // Fetch OpenAI-format tool definitions from all enabled tools assigned to an agent.
 // Returns the definitions array and a map of functionName ? tool server URL (or
 // the special '__qdrant__:<toolId>' sentinel for RAG tools).
+async function fetchRagManagerSpec(baseUrl: string): Promise<RagManagerSpec> {
+  const cached = ragManagerCache.get(baseUrl)
+  if (cached && Date.now() - cached.ts < RAG_MANAGER_CACHE_TTL) return cached.spec
+
+  const res = await fetch(`${baseUrl}/openapi.json`, { signal: AbortSignal.timeout(5000) })
+  if (!res.ok) throw new Error(`RAG Manager OpenAPI fetch failed: ${res.status}`)
+  const openapi = await res.json() as { paths?: Record<string, unknown> }
+
+  const endpoints: RagManagerEndpoint[] = []
+  for (const [path, pathObj] of Object.entries(openapi.paths ?? {})) {
+    if (!path.startsWith('/api/query_')) continue
+    const post = (pathObj as Record<string, unknown>)['post'] as Record<string, unknown> | undefined
+    if (!post) continue
+    endpoints.push({
+      operationId: String(post['operationId'] ?? path.replace('/api/', '')),
+      summary:     String(post['summary']     ?? path),
+      description: String(post['description'] ?? ''),
+      path,
+    })
+  }
+
+  const spec: RagManagerSpec = { baseUrl, endpoints }
+  ragManagerCache.set(baseUrl, { spec, ts: Date.now() })
+  return spec
+}
+
 async function fetchAgentTools(agent: TeamAgent): Promise<{ defs: unknown[]; urlMap: Map<string, string> }> {
   const defs: unknown[] = []
   const urlMap = new Map<string, string>()
@@ -833,9 +876,37 @@ async function fetchAgentTools(agent: TeamAgent): Promise<{ defs: unknown[]; url
         },
       })
       urlMap.set(funcName, `__qdrant__:${tool.id}`)
+    } else if (tool.type === 'rag_manager') {
+      const url = tool.config['url']
+      if (!url) continue
+      try {
+        const spec      = await fetchRagManagerSpec(url)
+        const allowRaw  = agent.toolCollections?.[tool.id] ?? ''
+        const allowSet  = allowRaw ? new Set(allowRaw.split(',').map(s => s.trim()).filter(Boolean)) : null
+        const endpoints = allowSet ? spec.endpoints.filter(e => allowSet.has(e.operationId)) : spec.endpoints
+        for (const ep of endpoints) {
+          defs.push({
+            type: 'function',
+            function: {
+              name:        ep.operationId,
+              description: ep.description || ep.summary,
+              parameters: {
+                type: 'object',
+                properties: {
+                  query: { type: 'string',  description: 'Natural language search query' },
+                  limit: { type: 'integer', description: 'Number of results to return (default 100)' },
+                },
+                required: ['query'],
+              },
+            },
+          })
+          urlMap.set(ep.operationId, `__rag_manager__:${tool.id}`)
+        }
+      } catch (err) {
+        console.warn(`[tools] Failed to fetch RAG Manager spec from ${tool.id} (${url}): ${err}`)
+      }
     }
   }
-
   // Always inject workbench tools -- available to every pipeline agent
   defs.push(...buildWorkbenchTools())
   urlMap.set('workbench_list',   WORKBENCH_SENTINEL)
@@ -984,6 +1055,14 @@ async function executeToolCall(
     return executeRagSearch(tool, args as { query: string; collection?: string; limit?: number })
   }
 
+  // RAG Manager sentinel
+  if (url.startsWith('__rag_manager__:')) {
+    const toolId = url.slice('__rag_manager__:'.length)
+    const tool   = TOOLS.find(t => t.id === toolId)
+    if (!tool) return JSON.stringify({ error: `RAG Manager tool not found: ${toolId}` })
+    return executeRagManagerCall(tool, name, args as { query: string; limit?: number })
+  }
+
   // OpenAI-tools HTTP server
   try {
     const res = await fetch(url, {
@@ -1047,6 +1126,29 @@ async function executeRagSearch(
     }))
 
     return JSON.stringify({ query: args.query, collection, results })
+  } catch (err) {
+    return JSON.stringify({ error: String(err) })
+  }
+}
+
+async function executeRagManagerCall(
+  tool:      ToolConfig,
+  operation: string,
+  args:      { query: string; limit?: number },
+): Promise<string> {
+  const baseUrl = tool.config['url']
+  if (!baseUrl) return JSON.stringify({ error: `RAG Manager tool '${tool.id}' missing url in config` })
+  try {
+    const body: Record<string, unknown> = { query: args.query }
+    if (args.limit !== undefined) body['limit'] = args.limit
+    const res = await fetch(`${baseUrl}/api/${operation}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal:  AbortSignal.timeout(30_000),
+    })
+    if (!res.ok) return JSON.stringify({ error: `RAG Manager ${res.status}: ${await res.text()}` })
+    return JSON.stringify(await res.json())
   } catch (err) {
     return JSON.stringify({ error: String(err) })
   }
@@ -2481,6 +2583,21 @@ app.get('/api/qdrant/collections', async (req: Request, res: Response) => {
     res.json(names)
   } catch (err) {
     res.status(502).json({ error: `Qdrant unreachable: ${err instanceof Error ? err.message : String(err)}` })
+  }
+})
+
+// RAG Manager endpoints proxy
+app.get('/api/rag-manager/endpoints', async (req: Request, res: Response) => {
+  const toolId = String(req.query['toolId'] ?? '')
+  const tool   = TOOLS.find(t => t.id === toolId && t.type === 'rag_manager')
+  if (!tool) { res.status(404).json({ error: 'RAG Manager tool not found' }); return }
+  const url = tool.config['url']
+  if (!url) { res.status(400).json({ error: 'Tool has no URL configured' }); return }
+  try {
+    const spec = await fetchRagManagerSpec(url)
+    res.json(spec.endpoints.map(e => ({ operationId: e.operationId, summary: e.summary })))
+  } catch (err) {
+    res.status(502).json({ error: `RAG Manager unreachable: ${err instanceof Error ? err.message : String(err)}` })
   }
 })
 

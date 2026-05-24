@@ -707,6 +707,7 @@ export const UI_HTML = `<!DOCTYPE html>
           <select id="t-type" onchange="renderToolConfigFields()">
             <option value="qdrant_rag">qdrant_rag � Qdrant Vector Search</option>
             <option value="openai_tools">openai_tools � OpenAI Tools Endpoint</option>
+            <option value="rag_manager">rag_manager � RAG Manager API</option>
           </select>
         </div>
         <div class="field" style="margin:0;display:flex;align-items:center;gap:12px;padding-top:22px">
@@ -751,6 +752,7 @@ var PROVIDER_DEFAULTS = {
 var TOOL_SCHEMAS = {
   qdrant_rag:   [['url','Qdrant URL'],['embeddingUrl','TEI Embedding URL']],
   openai_tools: [['url','Endpoint URL'],['apiKey','API Key']],
+  rag_manager:  [['url','RAG Manager URL']],
 };
 
 var AGENT_ICONS = ['??','?','???','??','??','???','???','??','??','??'];
@@ -1342,6 +1344,11 @@ function renderAgentToolRows(agent) {
             '<option value="">� loading collections... �</option>' +
           '</select>' +
         '</div>'
+      : t.type === 'rag_manager' ?
+        '<div class="tool-assign-config '+(assigned?'visible':'')+'" id="'+configId+'">' +
+          '<label style="font-size:12px;color:var(--text-muted);margin-bottom:4px;display:block">Allowed collections (empty = all)</label>' +
+          '<div id="rag-checks-'+t.id+'" style="font-size:12px">loading...</div>' +
+        '</div>'
       : '') +
     '</div>';
   }).join('');
@@ -1352,6 +1359,10 @@ function renderAgentToolRows(agent) {
       var savedCol = agent && agent.toolCollections && agent.toolCollections[t.id] || '';
       loadCollections(t.id, savedCol);
     }
+    if (t.type === 'rag_manager') {
+      var savedAllowlist = agent && agent.toolCollections && agent.toolCollections[t.id] || '';
+      loadRagEndpoints(t.id, savedAllowlist);
+    }
   });
 }
 
@@ -1360,7 +1371,11 @@ function onToolToggle(toolId) {
   var configEl = document.getElementById('tool-config-'+toolId);
   if (configEl) {
     configEl.className = 'tool-assign-config ' + (checked ? 'visible' : '');
-    if (checked) loadCollections(toolId, '');
+    var t = tools.find(function(x){ return x.id === toolId; });
+    if (checked && t) {
+      if (t.type === 'qdrant_rag')  loadCollections(toolId, '');
+      if (t.type === 'rag_manager') loadRagEndpoints(toolId, '');
+    }
   }
 }
 
@@ -1382,6 +1397,31 @@ function loadCollections(toolId, selectedCollection) {
     })
     .catch(function(e) {
       selEl.innerHTML = '<option value="">(Qdrant unreachable)</option>';
+    });
+}
+
+function loadRagEndpoints(toolId, savedAllowlist) {
+  var container = document.getElementById('rag-checks-'+toolId);
+  if (!container) return;
+  var saved = savedAllowlist ? savedAllowlist.split(',').map(function(s){ return s.trim(); }).filter(Boolean) : [];
+  container.innerHTML = 'loading…';
+  fetch('/api/rag-manager/endpoints?toolId='+encodeURIComponent(toolId))
+    .then(function(r){ return r.json(); })
+    .then(function(data) {
+      if (!Array.isArray(data) || !data.length) {
+        container.innerHTML = '<span style="color:var(--text-muted)">'+(data.error||'No endpoints found')+'</span>';
+        return;
+      }
+      container.innerHTML = data.map(function(ep) {
+        var isChecked = !saved.length || saved.indexOf(ep.operationId) !== -1;
+        return '<label style="display:flex;align-items:center;gap:6px;margin:2px 0;cursor:pointer">' +
+          '<input type="checkbox" class="rag-ep-cb" data-toolid="'+esc(toolId)+'" value="'+esc(ep.operationId)+'" '+(isChecked?'checked':'')+'>'+
+          '<span>'+esc(ep.summary)+'</span>'+
+          '</label>';
+      }).join('');
+    })
+    .catch(function() {
+      container.innerHTML = '<span style="color:var(--text-muted)">(RAG Manager unreachable)</span>';
     });
 }
 
@@ -1428,6 +1468,13 @@ function saveAgent() {
       if (t.type === 'qdrant_rag') {
         var colSel = document.getElementById('col-sel-'+t.id);
         if (colSel && colSel.value) toolCollections[t.id] = colSel.value;
+      }
+      if (t.type === 'rag_manager') {
+        var allCbs     = document.querySelectorAll('.rag-ep-cb[data-toolid="'+t.id+'"]');
+        var checkedCbs = Array.prototype.filter.call(allCbs, function(cb){ return cb.checked; });
+        if (checkedCbs.length && checkedCbs.length < allCbs.length) {
+          toolCollections[t.id] = checkedCbs.map(function(cb){ return cb.value; }).join(',');
+        }
       }
     }
   });

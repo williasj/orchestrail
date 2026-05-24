@@ -302,6 +302,7 @@ export const UI_HTML = `<!DOCTYPE html>
     <button class="tab-btn active" onclick="switchTab('agents',this)">Agents</button>
     <button class="tab-btn" onclick="switchTab('tools',this)">Tools</button>
     <button class="tab-btn" onclick="switchTab('coordinator',this)">Coordinator</button>
+    <button class="tab-btn" onclick="switchTab('configuration',this)">Configuration</button>
     <button class="tab-btn" onclick="switchTab('debug',this)">Debug</button>
   </div>
 
@@ -337,13 +338,13 @@ export const UI_HTML = `<!DOCTYPE html>
       <div style="max-width:640px">
         <div style="color:var(--text-dim);font-size:12px;margin-bottom:20px;line-height:1.6">
           The coordinator handles goal decomposition, clarification intake, and final synthesis.
-          It runs before and after the agent team — configure it independently of individual agents.
+          It runs before and after the agent team ï¿½ configure it independently of individual agents.
           <br><br>
           <span style="color:var(--text-muted)">&#9432;</span>
           <span style="color:var(--text-muted)">
             <strong style="color:var(--text-dim)">Dispatch:</strong> the coordinator receives the user goal, breaks it into tasks, and assigns each task to an agent.
             <strong style="color:var(--text-dim)">Synthesis:</strong> once all agents complete, the coordinator collects their outputs and writes the final unified response.
-            Both steps use this LLM — choose a model with strong instruction-following and long-context capability.
+            Both steps use this LLM ï¿½ choose a model with strong instruction-following and long-context capability.
           </span>
         </div>
         <div class="card" style="padding:24px">
@@ -380,7 +381,7 @@ export const UI_HTML = `<!DOCTYPE html>
         <div class="card" style="padding:24px;margin-top:16px">
           <div class="section-sep" style="margin-top:0">Inference Flags</div>
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.6">
-            Flags are prepended to every system prompt — coordinator <em>and</em> all agents — so you never have to touch individual prompts.
+            Flags are prepended to every system prompt ï¿½ coordinator <em>and</em> all agents ï¿½ so you never have to touch individual prompts.
             Only one thinking flag should be active at a time.
           </div>
           <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
@@ -414,7 +415,7 @@ export const UI_HTML = `<!DOCTYPE html>
             Called once when a goal arrives. The coordinator reads this prompt to decide whether to use
             <strong style="color:var(--text)">PIPELINE</strong> (design ? implement ? review ? test) or
             <strong style="color:var(--text)">PARALLEL</strong> (independent tasks), then produces a JSON task plan.
-            The agent roster and pipeline example are injected at runtime via template variables —
+            The agent roster and pipeline example are injected at runtime via template variables ï¿½
             always keep <code style="background:var(--bg);padding:1px 5px;border-radius:3px">{{AGENT_ROSTER}}</code> and
             <code style="background:var(--bg);padding:1px 5px;border-radius:3px">{{PIPELINE_EXAMPLE}}</code>
             or the coordinator won't know who to assign work to.
@@ -446,7 +447,7 @@ export const UI_HTML = `<!DOCTYPE html>
             <strong style="color:var(--text)">ESCALATE</strong> (send for fixes),
             <strong style="color:var(--text)">REWIND</strong> (re-run a prior stage),
             or <strong style="color:var(--text)">SYNTHESIZE</strong> (skip remaining and finalize).
-            The goal, remaining stages, and completed stage list are injected at runtime — use the vars below to position them in the prompt.
+            The goal, remaining stages, and completed stage list are injected at runtime ï¿½ use the vars below to position them in the prompt.
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
             <span style="font-size:10px;color:var(--text-muted);font-family:var(--mono);padding-top:2px">Available vars:</span>
@@ -474,13 +475,13 @@ export const UI_HTML = `<!DOCTYPE html>
             and responds with either <strong style="color:var(--text)">PROCEED</strong> (start work immediately) or
             <strong style="color:var(--text)">CLARIFY</strong> followed by up to 4 numbered questions.
             Only questions that would change the architecture or task structure should be asked.
-            No template variables — the goal arrives in the user message.
+            No template variables ï¿½ the goal arrives in the user message.
           </div>
           <div class="field" style="margin:0">
             <textarea id="c-clarification-prompt" rows="14"
               placeholder="Leave blank to use built-in default, or click Reset to default to load and edit it."
               style="width:100%;resize:vertical;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:12px;font-family:var(--mono);padding:8px 12px;outline:none;transition:border-color .15s;line-height:1.6;box-sizing:border-box"></textarea>
-            <div class="field-hint">Blank = use built-in default. Must respond with PROCEED or CLARIFY (followed by numbered questions) — any other response is treated as PROCEED.</div>
+            <div class="field-hint">Blank = use built-in default. Must respond with PROCEED or CLARIFY (followed by numbered questions) ï¿½ any other response is treated as PROCEED.</div>
           </div>
         </div>
 
@@ -492,17 +493,85 @@ export const UI_HTML = `<!DOCTYPE html>
           </div>
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.6">
             Called after all agents complete (or after SYNTHESIZE routing) to assemble the final response.
-            The original goal and all agent outputs arrive in the user message automatically —
+            The original goal and all agent outputs arrive in the user message automatically ï¿½
             this system prompt controls how they're combined.
             The built-in default instructs the synthesizer to reproduce implementation code verbatim
-            and not rewrite or simplify it — override here to change that behavior.
+            and not rewrite or simplify it ï¿½ override here to change that behavior.
             No template variables needed.
           </div>
           <div class="field" style="margin:0">
             <textarea id="c-synthesis-prompt" rows="10"
               placeholder="Leave blank to use built-in default, or click Reset to default to load and edit it."
               style="width:100%;resize:vertical;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:12px;font-family:var(--mono);padding:8px 12px;outline:none;transition:border-color .15s;line-height:1.6;box-sizing:border-box"></textarea>
-            <div class="field-hint">Blank = use built-in default. The user message always contains the goal and all specialist results — only the system-level behavior needs to be set here.</div>
+            <div class="field-hint">Blank = use built-in default. The user message always contains the goal and all specialist results ï¿½ only the system-level behavior needs to be set here.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="tab-panel" id="tab-configuration">
+      <div class="section-head">
+        <div class="section-title">Configuration</div>
+        <button class="btn btn-primary btn-sm" onclick="saveCoordinator()">Save</button>
+      </div>
+      <div style="max-width:640px">
+
+        <!-- Extended Memory (optional) -->
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">Extended Memory <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">(optional &mdash; requires Qdrant + TEI)</span></div>
+          </div>
+          <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+            <div class="field-hint" style="margin:0 0 4px">
+              When enabled, Orchestrail persists conversation workbenches, user preferences, and coordinator observations
+              to three dedicated Qdrant collections. Existing knowledge collections are never touched.
+            </div>
+            <div class="field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="mem-enabled" onchange="onMemEnabledChange()"
+                  style="width:16px;height:16px;accent-color:var(--accent)">
+                <span>Enable extended memory</span>
+              </label>
+            </div>
+            <div id="mem-fields" style="display:flex;flex-direction:column;gap:12px">
+              <div style="display:flex;gap:12px">
+                <div class="field" style="flex:1">
+                  <label>Qdrant URL</label>
+                  <input type="text" id="mem-qdrant-url" placeholder="http://10.20.0.17:6333">
+                </div>
+                <div class="field" style="flex:1">
+                  <label>TEI URL</label>
+                  <input type="text" id="mem-tei-url" placeholder="http://10.20.0.17:8764">
+                </div>
+              </div>
+              <div style="display:flex;gap:12px">
+                <div class="field" style="flex:1">
+                  <label>Vector Size</label>
+                  <input type="number" id="mem-vector-size" placeholder="1024" min="64" max="4096">
+                  <div class="field-hint">Must match your embedding model (e.g. 1024 for bge-large-en-v1.5)</div>
+                </div>
+                <div class="field" style="flex:1">
+                  <label>Retention Days</label>
+                  <input type="number" id="mem-retention-days" placeholder="90" min="0">
+                  <div class="field-hint">0 = keep forever. Applies to user &amp; institutional memory.</div>
+                </div>
+              </div>
+              <div style="display:flex;gap:12px">
+                <div class="field" style="flex:1">
+                  <label>Conversation Collection</label>
+                  <input type="text" id="mem-conv-col" placeholder="orchestrail_conversations">
+                </div>
+                <div class="field" style="flex:1">
+                  <label>User Collection</label>
+                  <input type="text" id="mem-user-col" placeholder="orchestrail_users">
+                </div>
+                <div class="field" style="flex:1">
+                  <label>Institutional Collection</label>
+                  <input type="text" id="mem-meta-col" placeholder="orchestrail_meta">
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -636,8 +705,8 @@ export const UI_HTML = `<!DOCTYPE html>
         <div class="field" style="margin:0">
           <label class="field-label">Type</label>
           <select id="t-type" onchange="renderToolConfigFields()">
-            <option value="qdrant_rag">qdrant_rag — Qdrant Vector Search</option>
-            <option value="openai_tools">openai_tools — OpenAI Tools Endpoint</option>
+            <option value="qdrant_rag">qdrant_rag ï¿½ Qdrant Vector Search</option>
+            <option value="openai_tools">openai_tools ï¿½ OpenAI Tools Endpoint</option>
           </select>
         </div>
         <div class="field" style="margin:0;display:flex;align-items:center;gap:12px;padding-top:22px">
@@ -789,7 +858,7 @@ function renderDebugLog() {
       '<div class="log-entry-head" onclick="toggleLogEntry(\\'' + e.id + '\\')">' +
         '<div class="log-dot ' + dotCls + '"></div>' +
         '<span class="' + agentCls + '">' + esc(e.agent) + '</span>' +
-        '<span style="color:var(--text-muted);font-size:11px;font-family:var(--mono)">›</span>' +
+        '<span style="color:var(--text-muted);font-size:11px;font-family:var(--mono)">ï¿½</span>' +
         '<span class="log-tool">' + esc(e.tool) + '</span>' +
         (isOverride ? '<span class="override-badge">OVERRIDE</span>' : '') +
         '<span class="log-preview">' + esc(preview) + '</span>' +
@@ -812,8 +881,8 @@ function renderDebugLog() {
 function buildCoordPreview(tool, parsed) {
   if (!parsed) return '(no result)';
   if (tool === 'clarify')    return parsed.decision + (parsed.decision === 'CLARIFY' ? ': ' + (parsed.questions||'').slice(0,80) : '');
-  if (tool === 'decompose')  return parsed.mode + ' — ' + (parsed.stages||parsed.tasks||[]).map(function(s){ return s.assignee||s; }).join(' ? ');
-  if (tool === 'route')      return parsed.action + (parsed.override ? ' [overrode ' + (parsed.note||'agent signal') + ']' : '') + (parsed.reason ? ' — ' + parsed.reason.slice(0,80) : '');
+  if (tool === 'decompose')  return parsed.mode + ' ï¿½ ' + (parsed.stages||parsed.tasks||[]).map(function(s){ return s.assignee||s; }).join(' ? ');
+  if (tool === 'route')      return parsed.action + (parsed.override ? ' [overrode ' + (parsed.note||'agent signal') + ']' : '') + (parsed.reason ? ' ï¿½ ' + parsed.reason.slice(0,80) : '');
   if (tool === 'synthesize') return (parsed.preview||'').slice(0,120);
   return JSON.stringify(parsed).slice(0,120);
 }
@@ -872,7 +941,7 @@ function resetPrompt(textareaId, key) {
   var val = coordinatorDefaults[key];
   if (!val) { toast('Defaults not loaded yet','err'); return; }
   document.getElementById(textareaId).value = val;
-  toast('Reset to default — remember to Save','ok');
+  toast('Reset to default ï¿½ remember to Save','ok');
 }
 
 function renderCoordinator(cfg) {
@@ -895,6 +964,18 @@ function renderCoordinator(cfg) {
   document.getElementById('c-routing-prompt').value       = (cfg && cfg.routingPrompt)       || '';
   document.getElementById('c-clarification-prompt').value = (cfg && cfg.clarificationPrompt) || '';
   document.getElementById('c-synthesis-prompt').value     = (cfg && cfg.synthesisPrompt)     || '';
+
+  // Extended memory
+  var mem = (cfg && cfg.memory) ? cfg.memory : {};
+  document.getElementById('mem-enabled').checked           = !!mem.enabled;
+  document.getElementById('mem-qdrant-url').value          = mem.qdrantUrl        || '';
+  document.getElementById('mem-tei-url').value             = mem.teiUrl           || '';
+  document.getElementById('mem-vector-size').value         = mem.vectorSize       != null ? String(mem.vectorSize)    : '';
+  document.getElementById('mem-retention-days').value      = mem.retentionDays    != null ? String(mem.retentionDays) : '';
+  document.getElementById('mem-conv-col').value            = mem.conversationCollection || '';
+  document.getElementById('mem-user-col').value            = mem.userCollection        || '';
+  document.getElementById('mem-meta-col').value            = mem.metaCollection        || '';
+  onMemEnabledChange();
 }
 
 function populateCoordModelDropdown(provider, currentModel) {
@@ -913,7 +994,7 @@ function populateCoordModelDropdown(provider, currentModel) {
   if (currentModel && !models.includes(currentModel)) models.unshift(currentModel);
   if (provider !== 'local') {
     var opt = document.createElement('option');
-    opt.value = '__custom__'; opt.textContent = '— enter model name below —';
+    opt.value = '__custom__'; opt.textContent = 'ï¿½ enter model name below ï¿½';
     sel.appendChild(opt);
   }
   models.forEach(function(m) {
@@ -1000,6 +1081,16 @@ function saveCoordinator() {
     routingPrompt:       document.getElementById('c-routing-prompt').value,
     clarificationPrompt: document.getElementById('c-clarification-prompt').value,
     synthesisPrompt:     document.getElementById('c-synthesis-prompt').value,
+    memory: {
+      enabled:                document.getElementById('mem-enabled').checked,
+      qdrantUrl:              document.getElementById('mem-qdrant-url').value.trim(),
+      teiUrl:                 document.getElementById('mem-tei-url').value.trim(),
+      vectorSize:             parseInt(document.getElementById('mem-vector-size').value) || 1024,
+      retentionDays:          parseInt(document.getElementById('mem-retention-days').value) || 90,
+      conversationCollection: document.getElementById('mem-conv-col').value.trim() || 'orchestrail_conversations',
+      userCollection:         document.getElementById('mem-user-col').value.trim() || 'orchestrail_users',
+      metaCollection:         document.getElementById('mem-meta-col').value.trim() || 'orchestrail_meta',
+    },
   };
   fetch('/api/coordinator', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
     .then(function(r){ return r.json(); })
@@ -1050,7 +1141,7 @@ function renderAgents() {
       '<div class="card-preview">'+esc((a.systemPrompt||'').slice(0,180))+'</div>' +
       '<div class="badges">' +
         '<span class="badge badge-provider">'+esc(providerLabel)+'</span>' +
-        '<span class="badge badge-model">'+esc(llm.model||'—')+'</span>' +
+        '<span class="badge badge-model">'+esc(llm.model||'ï¿½')+'</span>' +
         '<span class="badge badge-tokens">'+(a.maxTokens||4096)+' tok</span>' +
         toolBadges +
       '</div>' +
@@ -1069,9 +1160,9 @@ function renderTools() {
   grid.innerHTML = tools.map(function(t) {
     var configLines = Object.entries(t.config||{}).map(function(e){
       var v = e[1];
-      if (e[0].toLowerCase().includes('key')||e[0].toLowerCase().includes('token')) v = v?'••••••':'(not set)';
+      if (e[0].toLowerCase().includes('key')||e[0].toLowerCase().includes('token')) v = v?'ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½':'(not set)';
       return esc(e[0])+': '+esc(v||'(empty)');
-    }).join(' &nbsp;·&nbsp; ');
+    }).join(' &nbsp;ï¿½&nbsp; ');
     return '<div class="card">' +
       '<div class="card-header">' +
         '<div class="card-icon">??</div>' +
@@ -1145,7 +1236,7 @@ function populateModelDropdown(provider, currentModel) {
   // Allow free-text for custom
   if (provider === 'custom' || provider === 'openai' || provider === 'anthropic') {
     var custom = document.createElement('option');
-    custom.value = '__custom__'; custom.textContent = '— enter model name below —';
+    custom.value = '__custom__'; custom.textContent = 'ï¿½ enter model name below ï¿½';
     sel.appendChild(custom);
   }
   models.forEach(function(m) {
@@ -1248,7 +1339,7 @@ function renderAgentToolRows(agent) {
         '<div class="tool-assign-config '+(assigned?'visible':'')+'" id="'+configId+'">' +
           '<label>Collection</label>' +
           '<select id="'+colSelId+'">' +
-            '<option value="">— loading collections... —</option>' +
+            '<option value="">ï¿½ loading collections... ï¿½</option>' +
           '</select>' +
         '</div>'
       : '') +
@@ -1284,7 +1375,7 @@ function loadCollections(toolId, selectedCollection) {
       if (data.error) { selEl.innerHTML = '<option value="">'+esc(data.error)+'</option>'; return; }
       var cols = Array.isArray(data) ? data : [];
       if (!cols.length) { selEl.innerHTML = '<option value="">(no collections found)</option>'; return; }
-      selEl.innerHTML = '<option value="">— pick collection —</option>' +
+      selEl.innerHTML = '<option value="">ï¿½ pick collection ï¿½</option>' +
         cols.map(function(c) {
           return '<option value="'+esc(c)+'" '+(c===selectedCollection?'selected':'')+'>'+esc(c)+'</option>';
         }).join('');
@@ -1405,6 +1496,12 @@ function renderToolConfigFields(existingConfig) {
       '<input type="'+(isSecret?'password':'text')+'" id="tc-cfg-'+key+'" value="'+esc(conf[key]||'')+'" placeholder="'+(isSecret?'(blank = keep existing)':'')+'">' +
     '</div>';
   }).join('');
+}
+
+function onMemEnabledChange() {
+  var enabled = document.getElementById('mem-enabled').checked;
+  var fields  = document.getElementById('mem-fields');
+  fields.style.opacity = enabled ? '1' : '0.5';
 }
 
 function closeToolModal() {

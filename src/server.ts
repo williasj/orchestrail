@@ -130,6 +130,144 @@ function wbSet(slot: string, content: string): void {
 function wbList(): string[] { return Array.from(workbenchStore.get(wbId())?.keys() ?? []) }
 function wbClear(id: string): void { workbenchStore.delete(id) }
 
+// -- Memory (Qdrant + TEI) ---------------------------------------------------
+
+const cols = {
+  conversation: 'orchestrail_conversations',
+  users:        'orchestrail_users',
+  meta:         'orchestrail_meta',
+}
+
+function memoryEnabled(): boolean {
+  const m = COORDINATOR.memory
+  return !!(m?.qdrantUrl && m?.teiUrl && m?.vectorSize)
+}
+
+async function qdrantEnsureCollection(qdrantUrl: string, name: string, vectorSize: number): Promise<void> {
+  const res = await fetch(`${qdrantUrl}/collections/${name}`, { method: 'GET' })
+  if (res.ok) return
+  await fetch(`${qdrantUrl}/collections/${name}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vectors: { size: vectorSize, distance: 'Cosine' } }),
+  })
+}
+
+async function qdrantUpsert(
+  collection: string,
+  pointId: string,
+  text: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const m = COORDINATOR.memory
+  if (!m?.qdrantUrl || !m?.teiUrl || !m?.vectorSize) return
+  const embedRes = await fetch(`${m.teiUrl}/embed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inputs: text.slice(0, 2048) }),
+  })
+  if (!embedRes.ok) return
+  const vectors = await embedRes.json() as number[][]
+  const vector  = vectors[0]
+  if (!vector) return
+  // Derive a numeric ID from the string pointId via djb2
+  let h = 5381
+  for (let i = 0; i < pointId.length; i++) h = ((h << 5) + h + pointId.charCodeAt(i)) >>> 0
+  await fetch(`${m.qdrantUrl}/collections/${collection}/points`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ points: [{ id: h, vector, payload: { ...payload, text } }] }),
+  })
+}
+
+async function qdrantSearch(
+  collection: string,
+  query: string,
+  limit: number,
+  filter?: Record<string, unknown>,
+): Promise<Array<{ payload: Record<string, unknown>; score: number }>> {
+  const m = COORDINATOR.memory
+  if (!m?.qdrantUrl || !m?.teiUrl) return []
+  const embedRes = await fetch(`${m.teiUrl}/embed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inputs: query.slice(0, 2048) }),
+  })
+  if (!embedRes.ok) return []
+  const vectors = await embedRes.json() as number[][]
+  const vector  = vectors[0]
+  if (!vector) return []
+  const body: Record<string, unknown> = { vector, limit, with_payload: true }
+  if (filter) body['filter'] = filter
+  const searchRes = await fetch(`${m.qdrantUrl}/collections/${collection}/points/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!searchRes.ok) return []
+  const data = await searchRes.json() as { result: Array<{ payload: Record<string, unknown>; score: number }> }
+  return data.result ?? []
+}
+
+async function rehydrateWorkbench(conversationId: string, goal: string): Promise<void> {
+  if (!memoryEnabled() || !conversationId) return
+  const hits = await qdrantSearch(cols.conversation, goal, 10, {
+    must: [{ key: 'conversationId', match: { value: conversationId } }],
+  })
+  let restored = 0
+  for (const hit of hits) {
+    const slot    = hit.payload['slot'] as string | undefined
+    const content = hit.payload['text'] as string | undefined
+    if (slot && content && wbGet(slot) === null) {
+      wbSet(slot, content)
+      restored++
+    }
+  }
+  console.log(`[memory] rehydrated ${restored} workbench slot(s) for conversation ${conversationId}`)
+}
+
+// -- Conversation ID resolution ----------------------------------------------
+// Open WebUI sends no chat identifier (confirmed via body + header inspection).
+// First turns get a fresh UUID for isolation; follow-up turns reconnect via
+// convAliasMap keyed on hash(firstUserMsg + firstAssistantMsg).
+
+// Maps pipeline/workbench IDs to their conversation ID for memory persistence.
+const wbIdToConversationId = new Map<string, string>()
+
+// In-memory alias map: cleared on restart (acceptable -- isolation is session-scoped).
+const convAliasMap = new Map<string, string>()
+
+function djb2Short(s: string): string {
+  let h = 5381
+  for (let i = 0; i < Math.min(s.length, 512); i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return Math.abs(h).toString(16)
+}
+
+function resolveConversationId(messages: { role: string; content: string }[]): string {
+  const firstUser      = messages.find(m => m.role === 'user')?.content ?? ''
+  const firstAssistant = messages.find(m => m.role === 'assistant')?.content ?? ''
+  if (firstAssistant) {
+    const aliasKey = `${djb2Short(firstUser)}-${djb2Short(firstAssistant)}`
+    const cached   = convAliasMap.get(aliasKey)
+    if (cached) return cached
+    // Server restarted -- alias map lost; fall back to first-message hash
+    return `conv-${djb2Short(firstUser)}`
+  }
+  // First turn -- fresh UUID guarantees isolation between chats with identical openings
+  return `conv-${uuidv4().replace(/-/g, '').slice(0, 8)}`
+}
+
+function registerConvAlias(
+  messages: { role: string; content: string }[],
+  convId: string,
+  responseContent: string,
+): void {
+  const firstUser = messages.find(m => m.role === 'user')?.content ?? ''
+  if (!firstUser || !responseContent) return
+  const aliasKey = `${djb2Short(firstUser)}-${djb2Short(responseContent)}`
+  convAliasMap.set(aliasKey, convId)
+}
+
 // Validate that content looks like source code (not natural language)
 function looksLikeCode(content: string, languageHint?: string): boolean {
   if (!content || content.length < 10) return false
@@ -222,6 +360,13 @@ function buildWorkbenchTools(): unknown[] {
       description: 'List available code execution runtimes. Returns cached result if the runtimes slot is already populated; otherwise fetches from Piston and caches. Always call this before run_code to confirm the language string.',
       parameters: { type: 'object', properties: {}, required: [] },
     }},
+    { type: 'function', function: {
+      name: 'workbench_search',
+      description: 'Semantic search over workbench artifacts from prior conversation turns. Use to find relevant prior work by topic rather than exact slot name.',
+      parameters: { type: 'object', properties: {
+        query: { type: 'string', description: 'Natural language search query' },
+      }, required: ['query'] },
+    }},
   ]
 }
 const WORKBENCH_SENTINEL = '__workbench__'
@@ -237,6 +382,12 @@ interface LLMResponse {
   usage?: UsageTotals
 }
 
+interface MemoryConfig {
+  qdrantUrl:  string   // e.g. http://10.20.0.27:6333
+  teiUrl:     string   // text-embeddings-inference, e.g. http://10.20.0.27:8764
+  vectorSize: number   // must match TEI model (e.g. 1024)
+}
+
 interface CoordinatorConfig {
   llm:                  AgentLLM
   flags:                string[]  // prepended to every system prompt -- coordinator and all agents
@@ -244,6 +395,7 @@ interface CoordinatorConfig {
   routingPrompt?:       string    // overrides coordinatorRouteSystem(); use {{AGENT_ROSTER}}, {{GOAL}}, {{REMAINING_STAGES}}, {{COMPLETED_STAGES}}
   clarificationPrompt?: string    // overrides clarificationSystem(); no template vars needed
   synthesisPrompt?:     string    // overrides the synthesis system prompt; no template vars needed
+  memory?:              MemoryConfig
 }
 
 // -- Default LLM ---------------------------------------------------------------
@@ -686,9 +838,10 @@ async function fetchAgentTools(agent: TeamAgent): Promise<{ defs: unknown[]; url
 
   // Always inject workbench tools -- available to every pipeline agent
   defs.push(...buildWorkbenchTools())
-  urlMap.set('workbench_list',  WORKBENCH_SENTINEL)
-  urlMap.set('workbench_read',  WORKBENCH_SENTINEL)
-  urlMap.set('workbench_write', WORKBENCH_SENTINEL)
+  urlMap.set('workbench_list',   WORKBENCH_SENTINEL)
+  urlMap.set('workbench_read',   WORKBENCH_SENTINEL)
+  urlMap.set('workbench_write',  WORKBENCH_SENTINEL)
+  urlMap.set('workbench_search', WORKBENCH_SENTINEL)
   urlMap.set('list_runtimes',   WORKBENCH_SENTINEL)
   return { defs, urlMap }
 }
@@ -778,8 +931,32 @@ async function executeToolCall(
         }
         
         wbSet(slot, content)
+        // Async-upsert to Qdrant -- fire-and-forget, never blocks the pipeline
+        if (memoryEnabled()) {
+          const convId = wbIdToConversationId.get(wbId())
+          if (convId) {
+            qdrantUpsert(cols.conversation, `${convId}:${slot}`, content, {
+              conversationId: convId, slot, ts: Date.now(),
+            }).catch(() => {})
+          }
+        }
         return JSON.stringify({ ok: true, slot, bytes: content.length })
       }
+    if (name === 'workbench_search') {
+      if (!memoryEnabled()) return JSON.stringify({ error: 'Extended memory is not enabled.' })
+      const query  = String(args['query'] ?? '')
+      const convId = wbIdToConversationId.get(wbId())
+      const filter = convId
+        ? { must: [{ key: 'conversationId', match: { value: convId } }] }
+        : undefined
+      const hits   = await qdrantSearch(cols.conversation, query, 5, filter)
+      const results = hits.map(h => ({
+        slot:    h.payload['slot'],
+        content: h.payload['text'],
+        score:   h.score,
+      }))
+      return JSON.stringify(results)
+    }
     if (name === 'list_runtimes') {
       // Cache-first: return workbench slot if already populated
       const cached = wbGet('runtimes')
@@ -1542,10 +1719,11 @@ interface PipelineCallbacks {
 const MAX_REWINDS_PER_STAGE = 2   // prevent infinite rewind loops
 
 async function executePipeline(
-  stages:     PipelineStage[],
-  fullGoal:   string,
-  generation: number,
-  callbacks:  PipelineCallbacks,
+  stages:          PipelineStage[],
+  fullGoal:        string,
+  generation:      number,
+  callbacks:       PipelineCallbacks,
+  conversationId?: string,
 ): Promise<{ results: AgentResult[]; synthesizeEarly: boolean; wbSnapshot: Record<string, string> }> {
   const pipelineId    = uuidv4()
   const allResults:   AgentResult[]                                     = []
@@ -1555,7 +1733,10 @@ async function executePipeline(
   let implementationCode: string | null = null
   let stageIdx       = 0
 
+  if (conversationId) wbIdToConversationId.set(pipelineId, conversationId)
+
   return await workbenchIdStorage.run(pipelineId, async () => {
+  await rehydrateWorkbench(conversationId ?? '', fullGoal)
   // Runtimes are now fetched and cached by the software-architect stage as a required deliverable.
   // The architect calls list_runtimes, writes to workbench slot 'runtimes', and complete_stage
   // is blocked until that slot is written. All downstream agents read from the cache.
@@ -2340,6 +2521,15 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
   const baseGoal      = systemMessage ? `Context: ${systemMessage}\n\nGoal: ${goal}` : goal
   const completionId  = `chatcmpl-${uuidv4()}`
 
+  // Resolve a stable conversation ID for memory scoping.
+  // Open WebUI sends no chat identifier; resolveConversationId issues a fresh UUID
+  // on first turns and reconnects via convAliasMap on follow-up turns.
+  const body = req.body as Record<string, unknown>
+  const conversationId: string =
+    (typeof body['chat_id']    === 'string' && body['chat_id'])    ||
+    (typeof body['session_id'] === 'string' && body['session_id']) ||
+    resolveConversationId(messages)
+
   // -- Ghost request filter ----------------------------------------------------
   // OpenWebUI sends background metadata requests (title gen, tag gen, follow-up
   // suggestions) through the same /v1/chat/completions endpoint. These all start
@@ -2394,11 +2584,15 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
 
-    const sendChunk = (content: string) => res.write(`data: ${JSON.stringify({
-      id: completionId, object: 'chat.completion.chunk',
-      created: Math.floor(Date.now() / 1000), model: MODEL_ID,
-      choices: [{ index: 0, delta: { content }, finish_reason: null }],
-    })}\n\n`)
+    let responseBuffer = ''
+    const sendChunk = (content: string) => {
+      responseBuffer += content
+      res.write(`data: ${JSON.stringify({
+        id: completionId, object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000), model: MODEL_ID,
+        choices: [{ index: 0, delta: { content }, finish_reason: null }],
+      })}\n\n`)
+    }
 
     const sendDone = () => {
       const u = usageStorage.getStore() ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
@@ -2470,12 +2664,13 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
           onRewind: (fromStage, toStage, reason) => {
             sendChunk(`> **[coordinator]** rewinding to ${toStage}: ${reason}\n`)
           },
-        })
+        }, conversationId)
         completedResults    = pipelineResult.results
         synthesizeEarly     = pipelineResult.synthesizeEarly
         pipelineWbSnapshot  = pipelineResult.wbSnapshot
       } else {
         injectGoalIntoRootTasks(decomposed.specs, fullGoal)
+        wbIdToConversationId.set('default', conversationId)
         sendChunk(`> **[coordinator]** ${decomposed.specs.length} task${decomposed.specs.length !== 1 ? 's' : ''} assigned\n\n`)
         completedResults = await executeWithDeps(decomposed.specs, {
           onWaiting: (spec, waitingFor) => {
@@ -2509,6 +2704,7 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
         sendChunk(`\n\n---\n*Agents: ${agentList}*`)
       }
 
+      registerConvAlias(messages, conversationId, responseBuffer)
       sendDone()
       currentGeneration++ // abort any chains still running after response is sent
     } catch (err) {
@@ -2552,11 +2748,12 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
           onMaxRetries:       (stage) => { console.log(`[max retries] ${stage.name}`) },
           onCoordinatorRoute: (decision) => { console.log(`[coordinator] ${decision.action}${decision.targetAgent ? ' ? ' + decision.targetAgent : ''}${decision.rewindTo ? ' ? ' + decision.rewindTo : ''}: ${decision.reason}`) },
           onRewind:           (fromStage, toStage, reason) => { console.log(`[rewind] ${fromStage} ? ${toStage}: ${reason}`) },
-        })
+        }, conversationId)
         results      = pr.results
         nsWbSnapshot = pr.wbSnapshot
       } else {
         injectGoalIntoRootTasks(decomposed.specs, fullGoal)
+        wbIdToConversationId.set('default', conversationId)
         results = await executeWithDeps(decomposed.specs, {
           onWaiting:  (spec, waitingFor) => { console.log(`[deps] ${spec.assignee} waiting for: ${waitingFor.join(', ')}`) },
           onStart:    (spec)             => { console.log(`[start] ${spec.assignee}: ${spec.title}`) },
@@ -2569,6 +2766,7 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
         ? results[0].output + `\n\n---\n*Agent: ${results[0].assignee}*`
         : (await synthesize(fullGoal, results, nsWbSnapshot)) + `\n\n---\n*Agents: ${agentList}*`
 
+      registerConvAlias(messages, conversationId, content)
       res.json({
         id: completionId, object: 'chat.completion',
         created: Math.floor(Date.now() / 1000), model: MODEL_ID,
@@ -2584,10 +2782,21 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
 
 // -- Start ---------------------------------------------------------------------
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log('Orchestrail -- port ' + PORT)
   console.log('Ollama             -- ' + OLLAMA_BASE_URL)
   console.log('Coordinator        -- ' + COORDINATOR.llm.model + ' @ ' + COORDINATOR.llm.url)
   console.log('Agents             -- ' + AGENTS.map(a => a.name).join(', '))
   console.log('WebUI              -- http://localhost:' + PORT + '/ui')
+  const m = COORDINATOR.memory
+  if (m?.qdrantUrl && m?.teiUrl && m?.vectorSize) {
+    console.log('Memory (Qdrant)    -- ' + m.qdrantUrl)
+    console.log('Memory (TEI)       -- ' + m.teiUrl)
+    console.log('Memory (cols)      -- ' + Object.values(cols).join(', '))
+    try {
+      await Promise.all(Object.values(cols).map(c => qdrantEnsureCollection(m.qdrantUrl, c, m.vectorSize)))
+    } catch (e) {
+      console.warn('[memory] Failed to ensure collections:', e instanceof Error ? e.message : String(e))
+    }
+  }
 })

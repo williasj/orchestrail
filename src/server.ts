@@ -2288,9 +2288,26 @@ function parsePipelineSpec(llmOutput: string): PipelineStage[] | null {
 }
 
 async function decomposeGoal(goal: string): Promise<DecomposeResult> {
-  const t0  = Date.now()
+  const t0 = Date.now()
+
+  // Inject similar past patterns from institutional memory
+  let pastPatternsBlock = ''
+  if (memoryEnabled()) {
+    try {
+      const hits = await qdrantSearch(cols.meta, goal, 3)
+      if (hits.length > 0) {
+        const lines = hits.map((h, i) => {
+          const p = h.payload as { goal?: string; mode?: string; agents?: string[]; reflection?: string }
+          return `${i + 1}. Goal: "${String(p.goal ?? '').slice(0, 120)}" | Mode: ${p.mode ?? '?'} | Agents: ${(p.agents ?? []).join(', ')}\n   Reflection: ${String(p.reflection ?? '').slice(0, 200)}`
+        })
+        pastPatternsBlock = '\n\n## Patterns from similar past goals\n' + lines.join('\n')
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  const systemPrompt = coordinatorSystem() + pastPatternsBlock
   const raw = await callCoordinatorLLM([
-    { role: 'system', content: coordinatorSystem() },
+    { role: 'system', content: systemPrompt },
     { role: 'user',   content: `Decompose this goal. Use PIPELINE mode for any coding or implementation task.\n\nGoal: ${goal}\n\nRespond ONLY with JSON in a \`\`\`json code fence.` },
   ])
   const durationMs = Date.now() - t0
@@ -2426,6 +2443,39 @@ async function synthesize(goal: string, results: AgentResult[], wbSnapshot: Reco
     ok: true, durationMs,
   })
   return assembled
+}
+
+async function reflectAndStoreMetaMemory(
+  goal:      string,
+  mode:      'pipeline' | 'dag',
+  agents:    string[],
+  synthesis: string,
+  results:   AgentResult[],
+): Promise<void> {
+  if (!memoryEnabled()) return
+  const hadEscalations = results.some(r => r.completion?.status === 'ESCALATE')
+  const prompt =
+    'You coordinated a task. Write 2-3 concise sentences summarizing:\n' +
+    '1. What the goal was\n' +
+    '2. Which agents were used and what worked well\n' +
+    '3. Any issues, escalations, or failures that occurred\n\n' +
+    `Goal: ${goal.slice(0, 400)}\n` +
+    `Mode: ${mode}\n` +
+    `Agents: ${agents.join(', ')}\n` +
+    `Escalations: ${hadEscalations}\n` +
+    `Synthesis preview: ${synthesis.slice(0, 400)}\n\n` +
+    'Respond with ONLY the 2-3 sentence summary. No preamble.'
+  try {
+    const reflection = (await callCoordinatorLLM([{ role: 'user', content: prompt }], 256)).trim()
+    if (!reflection) return
+    await qdrantUpsert(cols.meta, `meta:${uuidv4()}`, goal, {
+      goal:       goal.slice(0, 500),
+      mode,
+      agents,
+      reflection,
+      ts:         Date.now(),
+    })
+  } catch { /* non-fatal */ }
 }
 
 function extractGoal(messages: { role: string; content: string }[]): string | null {
@@ -2819,6 +2869,7 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
         sendChunk(synthesis)
         const agentList = [...new Set(completedResults.map(r => r.assignee))].join(', ')
         sendChunk(`\n\n---\n*Agents: ${agentList}*`)
+        reflectAndStoreMetaMemory(fullGoal, decomposed.mode, [...new Set(completedResults.map(r => r.assignee))], synthesis, completedResults).catch(() => {})
       }
 
       registerConvAlias(messages, conversationId, responseBuffer)
@@ -2878,10 +2929,15 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
         }, generation)
       }
 
-      const agentList  = [...new Set(results.map(r => r.assignee))].join(', ')
-      const content    = results.length === 1 && results[0]
-        ? results[0].output + `\n\n---\n*Agent: ${results[0].assignee}*`
-        : (await synthesize(fullGoal, results, nsWbSnapshot)) + `\n\n---\n*Agents: ${agentList}*`
+      const agentList = [...new Set(results.map(r => r.assignee))].join(', ')
+      let content: string
+      if (results.length === 1 && results[0]) {
+        content = results[0].output + `\n\n---\n*Agent: ${results[0].assignee}*`
+      } else {
+        const synthesis = await synthesize(fullGoal, results, nsWbSnapshot)
+        reflectAndStoreMetaMemory(fullGoal, decomposed.mode, [...new Set(results.map(r => r.assignee))], synthesis, results).catch(() => {})
+        content = synthesis + `\n\n---\n*Agents: ${agentList}*`
+      }
 
       registerConvAlias(messages, conversationId, content)
       res.json({

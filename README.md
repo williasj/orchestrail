@@ -151,8 +151,7 @@ In Open WebUI, add a new connection:
 
 ## Add-ons
 
-<<<<<<< HEAD
-None yet but future state maybe!
+
 =======
 Optional add-ons live in the `add_ons/` directory. Each is self-contained
 with its own `docker-compose.yml` and `README.md`.

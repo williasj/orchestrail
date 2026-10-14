@@ -5,21 +5,23 @@
   "description": "Local multi-agent orchestration service with DAG scheduling and OpenAI-compatible API",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run copy-assets",
+    "copy-assets": "node -e \"const fs=require('fs'),p=require('path');const s='src/web/assets',d='dist/web/assets';fs.mkdirSync(d,{recursive:true});for(const f of fs.readdirSync(s))fs.copyFileSync(p.join(s,f),p.join(d,f));console.log('copied assets ->',d)\"",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts"
   },
   "dependencies": {
-    "express": "^4.18.2",
     "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "jsdom": "^29.1.1",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/cors": "^2.8.17",
-    "@types/uuid": "^9.0.7",
+    "@types/express": "^4.17.21",
     "@types/node": "^20.0.0",
-    "typescript": "^5.3.0",
-    "tsx": "^4.0.0"
+    "@types/uuid": "^9.0.7",
+    "tsx": "^4.0.0",
+    "typescript": "^5.3.0"
   }
 }

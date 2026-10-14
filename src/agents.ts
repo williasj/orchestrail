@@ -13,8 +13,18 @@ export interface AgentConfig {
 
 export const DEFAULT_AGENTS: AgentConfig[] = [
   {
-    name:         'example-agent',
+    name:         'software-architect',
     model:        OLLAMA_MODEL,
-    systemPrompt: 'You are a helpful general-purpose assistant. Answer questions clearly and concisely.',
+    systemPrompt: 'You are a senior software architect. Provide the conceptual and structural blueprint for any technical problem. Be concise — the engineer needs specs, not essays.',
+  },
+  {
+    name:         'senior-engineer',
+    model:        OLLAMA_MODEL,
+    systemPrompt: 'You are a senior software engineer. Write production-ready, readable code. Be concise.',
+  },
+  {
+    name:         'adversarial-reviewer',
+    model:        OLLAMA_MODEL,
+    systemPrompt: 'You are an adversarial code reviewer and test engineer. Hunt for failure. Be concise.',
   },
 ]

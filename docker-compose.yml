@@ -1,16 +1,72 @@
+# Combined orchestrail + orchestrail-exec stack (TrueNAS Scale).
+#
+# Build both images by hand FIRST (TrueNAS app compose does not build), then
+# redeploy this stack:
+#
+#   # patched orchestrail source -> the live src bind / build context
+#   #   copy the changed *.ts into /path/to/orchestrail/src/...
+#   cd /path/to/orchestrail
+#   sudo docker build -t orchestrail:latest .
+#
+#   # exec sandbox image
+#   cd /path/to/orchestrail/add_ons/orchestrail-exec
+#   sudo docker build -t orchestrail-exec:latest .
+#
+#   # one-time: exec bind dirs
+#   sudo mkdir -p /mnt/tempapp/APPS/orchestrail-exec/{workbench,pip-cache,npm-cache}
+#
+# orchestrail-exec is in THIS stack and reached only by service DNS
+# (http://orchestrail-exec:8766) -- never published to a host port, because it
+# runs arbitrary agent bash with internet access. The old code-exec-tools + piston
+# app can be deleted.
+
 services:
-  orchestrail:
-    container_name: orchestrail
-    build: .
+  local-agentic-team:
+    container_name: local-agentic-team
     environment:
       - PORT=8080
-      - OLLAMA_MODEL=llama3.2
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-      - OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+      - OLLAMA_MODEL=qwen3-coder-next:iq3
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      - OPENAI_BASE_URL=http://ollama:11434/v1
       - OPENAI_API_KEY=ollama
       - DATA_DIR=/data
+      - PIPELINES_API_KEY=change-me
+      - ADMIN_EMAIL=admin@example.com
+      - ADMIN_PASSWORD=change-me
+      - SOURCE_ROOT=/app/src
+      # NEW: reach the exec sidecar over same-stack service DNS (was the old
+      # code-exec-tools host port). This is the only env change to orchestrail.
+      - CODE_EXEC_URL=http://orchestrail-exec:8766/
+    image: orchestrail:latest
     ports:
-      - '8089:8080'
+      - '8689:8080'
+    restart: unless-stopped
+    depends_on:
+      - orchestrail-exec
     volumes:
-      - ./data:/data
+      - /mnt/tempapp/APPS/local-agentic-team:/data
+      - /mnt/tempapp/APPS/orchestrail/skills:/data/skills
+      - /mnt/tempapp/APPS/orchestrail/rag:/data/rag
+      - /mnt/tempapp/APPS/orchestrail/users:/data/rag/users
+      - /path/to/orchestrail/src:/app/src
+
+  orchestrail-exec:
+    container_name: orchestrail-exec
+    image: orchestrail-exec:latest
+    # NET_ADMIN lets the entrypoint apply the iptables egress lockdown (drop
+    # RFC-1918 incl. your LAN, keep DNS + public internet for pip/npm).
+    # Without it the entrypoint HARD FAILS rather than run agent code with full
+    # LAN reach. If your kernel/host refuses NET_ADMIN, set EXEC_ALLOW_LAN=1 ONLY
+    # if this stack is already on an isolated network.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - EXEC_PORT=8766
+      - WORKBENCH_ROOT=/workbench
+      - RUN_TIMEOUT_MS=60000
+    volumes:
+      - /mnt/tempapp/APPS/orchestrail-exec/workbench:/workbench
+      - /mnt/tempapp/APPS/orchestrail-exec/pip-cache:/cache/pip
+      - /mnt/tempapp/APPS/orchestrail-exec/npm-cache:/cache/npm
+    # No ports: internal to the stack only. Do NOT publish 8766.
     restart: unless-stopped

@@ -859,7 +859,7 @@ function populateModelDropdown(provider, currentModel) {
 
   var models = [];
   if (provider === 'local') {
-    models = ollamaModels.length ? ollamaModels : (currentModel ? [currentModel] : ['llama3.2']);
+    models = ollamaModels.length ? ollamaModels : (currentModel ? [currentModel] : ['qwen3.8:27b-orchestrail']);
   } else if (provider === 'openai') {
     models = ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo'];
   } else if (provider === 'anthropic') {

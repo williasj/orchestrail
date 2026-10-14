@@ -1,5 +1,5 @@
 export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://host.docker.internal:11434/v1'
-export const OLLAMA_MODEL    = process.env.OLLAMA_MODEL    || 'llama3.2'
+export const OLLAMA_MODEL    = process.env.OLLAMA_MODEL    || 'qwen3.8:27b-orchestrail'
 
 /**
  * Minimal agent descriptor used to seed the default agent roster on first

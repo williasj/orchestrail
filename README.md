@@ -116,7 +116,7 @@ All configuration is via environment variables:
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP server port |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434/v1` | Ollama API base URL |
-| `OLLAMA_MODEL` | `llama3.2` | Default model for agents |
+| `OLLAMA_MODEL` | `qwen3.8:27b-orchestrail` | Default model for agents |
 | `OPENAI_API_KEY` | `ollama` | API key (set to `ollama` for local) |
 | `DATA_DIR` | `/data` | Persistent data directory for agent/tool config |
 

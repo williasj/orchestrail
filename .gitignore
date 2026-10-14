@@ -28,3 +28,4 @@ Thumbs.db
 # Local-only (real credentials / scratch)
 docker-compose.local.yml
 _archive/
+.ops/

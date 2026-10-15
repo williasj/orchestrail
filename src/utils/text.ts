@@ -68,8 +68,12 @@ export function isObviouslyProse(content: string): boolean {
  * Removes markdown code block fences if present, returning the inner content.
  */
 export function stripCodeBlockDelimiters(content: string): string {
-  const fenceMatch = content.match(/```[\w]*\n([\s\S]*?)```/)
-  if (fenceMatch) return fenceMatch[1]!.trim()
+  // Unwrap ONLY when the whole content is one fenced block. Matching a fence
+  // anywhere threw away everything but the first block: a markdown blueprint
+  // with a signatures block was stored as 111 bytes of signatures, and a test
+  // report with a fenced output block as just that output.
+  const whole = content.match(/^\s*```[\w+-]*[ \t]*\n([\s\S]*?)\n?```\s*$/)
+  if (whole && !whole[1]!.includes('```')) return whole[1]!.trim()
   return content.trim()
 }
 

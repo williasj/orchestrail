@@ -787,6 +787,12 @@ export async function executeToolCall(
       if (!slot) return JSON.stringify({ error: 'slot is required' })
 
       content = stripCodeBlockDelimiters(content)
+      // Code slots hold code only: "Here is the code: ```...```" keeps just the code,
+      // as long as there is exactly one fenced block. Document slots keep their markdown.
+      if (slot === 'implementation' || slot === 'test_harness') {
+        const fences = [...content.matchAll(/```[\w+-]*[ \t]*\n([\s\S]*?)```/g)]
+        if (fences.length === 1) content = fences[0]![1]!.trim()
+      }
       content = stripThinkBlocks(content)
 
       if (slot === 'runtimes') {

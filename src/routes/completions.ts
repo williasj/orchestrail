@@ -4,6 +4,7 @@
 
 import { wikiAppendLog, wikiContextFor, wikiSlug, type WikiScope } from '../core/wikiclient.js'
 import { stripCodeBlocks } from '../utils/text.js'
+import { incidentsFromResults, proposeLessons } from '../core/wikilearn.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { v4 as uuidv4 }     from 'uuid'
 import type { Request, Response, Router } from 'express'
@@ -695,6 +696,13 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
         }
 
         appendMessage(userId, conversationId, 'assistant', responseBuffer)
+
+        // Write-back loop: a run that hit trouble may propose a general lesson for review
+        const incidents = incidentsFromResults(completedResults, rewindCount)
+        if (incidents.length) {
+          proposeLessons(wikiScope, { goal: fullGoal, outcome: finalText.slice(0, 1500), incidents, source: conversationId })
+            .catch(() => {})
+        }
 
         // Deterministic project write-back: every run in a bound conversation is logged
         if (projectId) {

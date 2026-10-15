@@ -13,6 +13,7 @@
 
 import { readProject, readProjectMd } from './store.js'
 import type { BTStatus, BTTask } from './types.js'
+import { proposeLessons } from '../core/wikilearn.js'
 import {
   wikiAppendDecision, wikiAppendLog, wikiContextFor, wikiEnabled, wikiEnsureIndex, wikiUpsertSection,
   type WikiScope,
@@ -62,6 +63,21 @@ export async function btWikiRunEnd(slug: string, runNo: string, status: BTStatus
       `Details are in the project log.`)
   } catch (e) {
     console.warn(`[bullettrain] wiki run-end sync failed for ${slug}: ${e}`)
+  }
+  // Write-back loop: retries, blocked tasks or a halt may teach a general lesson
+  const incidents: string[] = []
+  if (status.state !== 'done') incidents.push(`run ended ${status.state}${status.halt_reason ? ` (${status.halt_reason})` : ''}: ${status.message ?? ''}`)
+  for (const t of tasks) {
+    if (t.mark !== 'x' || t.attempts > 1 || t.error)
+      incidents.push(`task "${t.title}" [${t.mark}] took ${t.attempts} attempt(s)${t.error ? `; last error: ${t.error.slice(0, 300)}` : ''}`)
+  }
+  if (incidents.length && !['orchestrail_restart', 'exec_unreachable', 'llm_unreachable'].includes(String(status.halt_reason))) {
+    proposeLessons(scope, {
+      goal: firstLines(readProjectMd(slug), 12, 600),
+      outcome: `${status.state}: ${status.message ?? ''}`,
+      incidents: incidents.slice(0, 10),
+      source: `bt-${slug}-${runNo}`,
+    }).catch(() => {})
   }
 }
 

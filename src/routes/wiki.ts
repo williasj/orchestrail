@@ -2,12 +2,15 @@
 //   GET  /api/wiki/status                      is the wiki configured / reachable
 //   GET  /api/wiki/projects                    the signed-in user's projects
 //   PUT  /api/conversations/:convId/project    bind / unbind { project: string | null }
+//   POST /api/wiki/lessons/draft               admin: draft lesson proposals from a post-mortem
+//        { goal, outcome, incidents: string[], source }  (same path a troubled run takes)
 // The project binding is the user's choice; agents never set their own scope.
 
 import type { Request, Response, Router } from 'express'
 import { requireAuth } from './auth.js'
 import { getConversationProject, setConversationProject, listAllConversations } from '../core/conversation.js'
 import { AIWIKI_URL, wikiEnabled, wikiRequest, wikiSlug } from '../core/wikiclient.js'
+import { proposeLessons } from '../core/wikilearn.js'
 
 export function registerWikiRoutes(router: Router): void {
   router.get('/api/wiki/status', requireAuth, async (req: Request, res: Response) => {
@@ -21,6 +24,18 @@ export function registerWikiRoutes(router: Router): void {
     const r = await wikiRequest<unknown[]>('GET', '/api/projects', { user: req.auth!.email })
     if (!r.ok) { res.status(502).json({ error: r.error }); return }
     res.json(r.data ?? [])
+  })
+
+  router.post('/api/wiki/lessons/draft', requireAuth, async (req: Request, res: Response) => {
+    if (req.auth?.role !== 'admin') { res.status(403).json({ error: 'admin only' }); return }
+    const b = (req.body ?? {}) as { goal?: string; outcome?: string; incidents?: unknown; source?: string }
+    const incidents = Array.isArray(b.incidents) ? b.incidents.map(String).filter(Boolean).slice(0, 12) : []
+    if (!incidents.length) { res.status(400).json({ error: 'incidents (string[]) is required' }); return }
+    const proposed = await proposeLessons({ user: req.auth!.email }, {
+      goal: String(b.goal ?? ''), outcome: String(b.outcome ?? ''), incidents,
+      source: String(b.source ?? 'manual').slice(0, 64),
+    })
+    res.json({ proposed })
   })
 
   router.put('/api/conversations/:convId/project', requireAuth, (req: Request, res: Response) => {

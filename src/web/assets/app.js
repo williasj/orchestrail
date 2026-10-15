@@ -1887,7 +1887,7 @@ var chatProject  = null;
 var chatProjects = [];
 
 function chatLoadProjects() {
-  apiFetch('/api/wiki/status').then(function(r){ return r.json(); }).then(function(st) {
+  return apiFetch('/api/wiki/status').then(function(r){ return r.json(); }).then(function(st) {
     var bar = document.getElementById('chat-project-bar');
     if (!st || !st.enabled) { bar.style.display = 'none'; return; }
     bar.style.display = 'flex';
@@ -1938,7 +1938,7 @@ function loadChatConvList() {
     .then(function(r){ return r.json(); })
     .then(function(data) {
       if (data.error) return;
-      chatConvList = Array.isArray(data) ? data : [];
+      chatConvList = (Array.isArray(data) ? data : []).filter(function(c){ return c.mode !== 'direct'; });
       renderChatSidebar();
     })
     .catch(function(){});
@@ -2527,3 +2527,198 @@ function btRenderStatus(slug, runNo, d) {
       '</div>' + errLine;
   }).join('');
 }
+
+// -- Direct Chat ----------------------------------------------------------------
+// One model plus Orchestrail tools, no team pipeline. Conversations are stored
+// with mode 'direct' and listed only here; the Agentic Team list hides them.
+
+var dcConvId = null, dcMessages = [], dcConvList = [], dcStreaming = false;
+var dcOptions = null, dcTools = null, dcModel = null, dcProject = null;
+
+function dcLoadOptions() {
+  var p1 = apiFetch('/api/direct/options').then(function(r){ return r.json(); });
+  var p2 = apiFetch('/api/ollama/models').then(function(r){ return r.json(); }).catch(function(){ return []; });
+  return Promise.all([p1, p2]).then(function(v) {
+    dcOptions = v[0] || {};
+    if (!dcTools) dcTools = (dcOptions.defaultTools || []).slice();
+    if (!dcModel) dcModel = dcOptions.defaultModel || '';
+    var raw = v[1], models = [];
+    var arr = Array.isArray(raw) ? raw : (raw && (raw.models || raw.data)) || [];
+    arr.forEach(function(m){ var n = typeof m === 'string' ? m : (m.name || m.id || m.model); if (n && models.indexOf(n) === -1) models.push(n); });
+    if (dcModel && models.indexOf(dcModel) === -1) models.unshift(dcModel);
+    var sel = document.getElementById('dc-model');
+    sel.innerHTML = models.map(function(n){ return '<option value="' + esc(n) + '">' + esc(n) + (n === dcOptions.defaultModel ? ' (default)' : '') + '</option>'; }).join('');
+    sel.value = dcModel;
+    sel.onchange = function(){ dcModel = sel.value; };
+    dcRenderTools();
+    dcRenderProjects();
+  }).catch(function(){});
+}
+
+function dcRenderTools() {
+  var box = document.getElementById('dc-tools');
+  var tools = (dcOptions && dcOptions.tools) || [];
+  box.innerHTML = tools.map(function(t) {
+    var on = dcTools.indexOf(t.id) !== -1;
+    return '<span class="dc-tool' + (on ? ' on' : '') + '" title="' + esc(t.type) + '" onclick="dcToggleTool(' + esc(JSON.stringify(t.id)) + ')">' + esc(t.name) + '</span>';
+  }).join('') || '<span style="color:var(--text-muted)">none configured</span>';
+}
+
+function dcToggleTool(id) {
+  var i = dcTools.indexOf(id);
+  if (i === -1) dcTools.push(id); else dcTools.splice(i, 1);
+  dcRenderTools();
+}
+
+function dcRenderProjects() {
+  var sel = document.getElementById('dc-project');
+  var names = (typeof chatProjects !== 'undefined' ? chatProjects : []).slice();
+  if (dcProject && names.indexOf(dcProject) === -1) names.unshift(dcProject);
+  sel.innerHTML = '<option value="">No project</option>' +
+    names.map(function(n){ return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') +
+    '<option value="__new__">+ New project...</option>';
+  sel.value = dcProject || '';
+}
+
+function dcProjectChanged() {
+  var sel = document.getElementById('dc-project');
+  if (sel.value === '__new__') {
+    var name = window.prompt('New project name (letters, digits, dashes):', '');
+    var slug = (name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+    if (slug && typeof chatProjects !== 'undefined' && chatProjects.indexOf(slug) === -1) chatProjects.unshift(slug);
+    dcProject = slug || dcProject;
+    dcRenderProjects();
+  } else {
+    dcProject = sel.value || null;
+  }
+  if (dcConvId) {
+    apiFetch('/api/conversations/' + encodeURIComponent(dcConvId) + '/project', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project: dcProject })
+    }).then(function(){ dcLoadConvList(); }).catch(function(){});
+  }
+}
+
+function dcLoadConvList() {
+  apiFetch('/api/conversations').then(function(r){ return r.json(); }).then(function(data) {
+    dcConvList = (Array.isArray(data) ? data : []).filter(function(c){ return c.mode === 'direct'; });
+    var list = document.getElementById('dc-conv-list');
+    if (!dcConvList.length) {
+      list.innerHTML = '<div style="padding:16px;font-size:11px;color:var(--text-muted);font-family:var(--mono);">No direct chats yet.</div>';
+      return;
+    }
+    list.innerHTML = dcConvList.map(function(c) {
+      return '<div class="chat-conv-item' + (c.id === dcConvId ? ' active' : '') + '" onclick="dcOpenConv(' + esc(JSON.stringify(c.id)) + ')">' +
+        '<div class="chat-conv-title">' + esc(c.title || 'Untitled') + '</div>' +
+        '<div class="chat-conv-meta">' + esc((c.lastActive || '').slice(0, 10)) + (c.project ? ' &middot; ' + esc(c.project) : '') + '</div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function dcRender() {
+  var box = document.getElementById('dc-messages');
+  if (!dcMessages.length) {
+    box.innerHTML = '<div style="margin:auto;text-align:center;color:var(--text-muted);font-size:13px;max-width:420px;">' +
+      '<div style="font-size:28px;margin-bottom:12px;opacity:.3;">&#x25A1;</div>' +
+      'A direct conversation with one model. Tools toggled above are available to it: a persistent sandbox for this chat, web search, AIWiki and more.</div>';
+    return;
+  }
+  box.innerHTML = dcMessages.map(function(m) {
+    var ts = m.ts ? new Date(m.ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    var user = m.role === 'user';
+    return '<div class="chat-msg ' + (user ? 'user' : 'asst') + '"><div class="chat-bubble">' +
+      (user ? esc(m.content) : renderChatContent(m.content, false)) + '</div>' +
+      (ts ? '<div class="chat-ts">' + esc(ts) + '</div>' : '') + '</div>';
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function dcOpenConv(id) {
+  if (dcStreaming) return;
+  dcConvId = id;
+  var meta = dcConvList.filter(function(c){ return c.id === id; })[0];
+  dcProject = (meta && meta.project) || null;
+  dcRenderProjects();
+  dcMessages = [];
+  dcRender();
+  dcLoadConvList();
+  apiFetch('/api/conversations/' + encodeURIComponent(id) + '/messages').then(function(r){ return r.json(); }).then(function(data) {
+    if (!Array.isArray(data)) return;
+    dcMessages = data.map(function(m){ return { role: m.role, content: m.content, ts: m.ts }; });
+    dcRender();
+  }).catch(function(){});
+}
+
+function dcNewConversation() {
+  if (dcStreaming) return;
+  dcConvId = null; dcMessages = [];
+  dcRender(); dcLoadConvList();
+  document.getElementById('dc-input').focus();
+}
+
+function dcInputKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); dcSend(); }
+}
+
+function dcSetBusy(busy) {
+  dcStreaming = busy;
+  document.getElementById('dc-input').disabled = busy;
+  document.getElementById('dc-send-btn').disabled = busy;
+}
+
+function dcSend() {
+  if (dcStreaming) return;
+  var input = document.getElementById('dc-input');
+  var text = input.value.trim();
+  if (!text) return;
+  input.value = ''; chatInputResize(input);
+  dcMessages.push({ role: 'user', content: text, ts: Date.now() });
+  var live = { role: 'assistant', content: '', ts: 0 };
+  dcMessages.push(live);
+  dcRender();
+  var bubbles = document.querySelectorAll('#dc-messages .chat-msg.asst .chat-bubble');
+  var bubble = bubbles[bubbles.length - 1];
+  bubble.innerHTML = '<div class="chat-typing"><span></span><span></span><span></span></div>';
+  dcSetBusy(true);
+
+  var finish = function(extra) {
+    if (extra) live.content += extra;
+    live.ts = Date.now();
+    dcSetBusy(false);
+    dcRender();
+    dcLoadConvList();
+    input.focus();
+  };
+  fetch('/api/direct/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+    body: JSON.stringify({ message: text, conversationId: dcConvId || undefined, model: dcModel || undefined, tools: dcTools || undefined, project: dcProject })
+  }).then(function(res) {
+    if (!res.ok) return res.json().then(function(d){ throw new Error(d.error || 'Request failed'); });
+    var reader = res.body.getReader(), decoder = new TextDecoder(), buf = '';
+    function pump() {
+      return reader.read().then(function(part) {
+        if (part.done) { finish(); return; }
+        buf += decoder.decode(part.value, { stream: true });
+        var lines = buf.split(String.fromCharCode(10)); buf = lines.pop();
+        lines.forEach(function(line) {
+          if (line.indexOf('data: ') !== 0) return;
+          try {
+            var ev = JSON.parse(line.slice(6));
+            if (ev.type === 'init') { if (!dcConvId) dcConvId = ev.conversationId; }
+            else if (ev.type === 'chunk') { live.content += ev.content; bubble.innerHTML = renderChatContent(live.content, false); var b = document.getElementById('dc-messages'); b.scrollTop = b.scrollHeight; }
+          } catch (e) {}
+        });
+        return pump();
+      });
+    }
+    return pump();
+  }).catch(function(e) { finish('\n\n**Error:** ' + e.message); });
+}
+
+TAB_LOADERS['direct'] = function() {
+  var go = function() { dcLoadOptions(); dcLoadConvList(); if (!dcMessages.length) dcRender(); };
+  if (typeof chatLoadProjects === 'function' && (typeof chatProjects === 'undefined' || !chatProjects.length)) {
+    try { var p = chatLoadProjects(); if (p && p.then) { p.then(go, go); return; } } catch (e) {}
+  }
+  go();
+};

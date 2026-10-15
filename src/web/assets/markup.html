@@ -42,7 +42,8 @@
   </div>
 
   <div class="tabs-bar">
-    <button class="tab-btn active" id="tab-btn-chat" onclick="switchTab('chat',this)">Chat</button>
+    <button class="tab-btn active" id="tab-btn-chat" onclick="switchTab('chat',this)">Agentic Team</button>
+    <button class="tab-btn" id="tab-btn-direct" onclick="switchTab('direct',this)">Direct Chat</button>
     <button class="tab-btn" id="tab-btn-logs" onclick="switchTab('debug',this)">Conversation Logs</button>
     <button class="tab-btn" id="tab-btn-agents" onclick="switchTab('agents',this)">Agents</button>
     <button class="tab-btn" id="tab-btn-tools" onclick="switchTab('tools',this)">Tools</button>
@@ -110,6 +111,34 @@
           <button id="chat-send-btn" class="btn btn-primary" onclick="chatSend()" style="height:40px;padding:0 18px;flex-shrink:0;">Send</button>
         </div>
 
+      </div>
+    </div>
+
+    <!-- Direct Chat: one model, Orchestrail tools, no team pipeline -->
+    <div class="tab-panel" id="tab-direct">
+      <div style="width:240px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--surface);">
+        <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+          <span style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);font-family:var(--mono);">Direct chats</span>
+          <button class="btn btn-ghost btn-sm" onclick="dcNewConversation()" title="New chat">+</button>
+        </div>
+        <div id="dc-conv-list" style="flex:1;overflow-y:auto;padding:8px 0;"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg);">
+        <div id="dc-options" style="padding:8px 20px;border-bottom:1px solid var(--border);background:var(--surface);display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12px;">
+          <span class="dc-label">Model</span>
+          <select id="dc-model" class="dc-select"></select>
+          <span class="dc-label">Project</span>
+          <select id="dc-project" class="dc-select" onchange="dcProjectChanged()"></select>
+          <span class="dc-label">Tools</span>
+          <span id="dc-tools" style="display:flex;flex-wrap:wrap;gap:6px;"></span>
+        </div>
+        <div id="dc-messages" style="flex:1;overflow-y:auto;padding:24px 28px;display:flex;flex-direction:column;gap:16px;"></div>
+        <div style="padding:16px 20px;border-top:1px solid var(--border);background:var(--surface);display:flex;gap:10px;align-items:flex-end;">
+          <textarea id="dc-input" rows="1" placeholder="Ask anything... (Enter to send, Shift+Enter for newline)"
+            style="flex:1;resize:none;min-height:40px;max-height:160px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:13px;padding:9px 12px;font-family:var(--sans);line-height:1.5;outline:none;"
+            onkeydown="dcInputKeydown(event)" oninput="chatInputResize(this)"></textarea>
+          <button id="dc-send-btn" class="btn btn-primary" onclick="dcSend()" style="height:40px;padding:0 18px;flex-shrink:0;">Send</button>
+        </div>
       </div>
     </div>
 

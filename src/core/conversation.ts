@@ -100,6 +100,7 @@ export interface ConversationMeta {
   createdAt:   string
   lastActive:  string
   project?:    string   // AIWiki project slug this conversation is bound to
+  mode?:       'direct' // set for Direct Chat conversations; absent = agentic team
 }
 
 export interface StoredMessage {
@@ -343,6 +344,17 @@ export function getConversationProject(userId: string, convId: string): string |
     const meta = JSON.parse(fs.readFileSync(metaPath(userId, convId), 'utf8')) as ConversationMeta
     return meta.project || null
   } catch { return null }
+}
+
+export function setConversationMode(userId: string, convId: string, mode: 'direct' | null): boolean {
+  const file = metaPath(userId, convId)
+  try {
+    const meta = JSON.parse(fs.readFileSync(file, 'utf8')) as ConversationMeta
+    if (mode) meta.mode = mode
+    else delete meta.mode
+    fs.writeFileSync(file, JSON.stringify(meta, null, 2))
+    return true
+  } catch { return false }
 }
 
 export function setConversationProject(userId: string, convId: string, project: string | null): boolean {

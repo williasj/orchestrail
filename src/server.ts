@@ -45,6 +45,7 @@ import { registerBulletTrainRoutes } from './bullettrain/routes.js'
 import { recoverStrandedRuns }       from './bullettrain/supervisor.js'
 import { registerSkillRoutes }       from './routes/skills.js'
 import { registerWikiRoutes }        from './routes/wiki.js'
+import { registerDirectRoutes }      from './routes/direct.js'
 import { initUsers }                 from './core/users.js'
 import type { TeamAgent, ToolConfig, CoordinatorConfig } from './types/index.js'
 
@@ -164,6 +165,7 @@ registerBulletTrainRoutes(app)
 recoverStrandedRuns()
 registerSkillRoutes(app, { exec: runCodeViaTool })
 registerWikiRoutes(app)
+registerDirectRoutes(app, { getCoordinator: () => COORDINATOR, getTools: () => TOOLS })
 
 // -- Start ---------------------------------------------------------------------
 

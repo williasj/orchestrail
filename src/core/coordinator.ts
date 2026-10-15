@@ -210,6 +210,7 @@ export function createCoordinatorRoute(deps: CoordinatorRouteDeps): CoordinatorR
         result: JSON.stringify({
           action:  decision.action,
           reason:  decision.reason,
+          model:   firstLine.slice(0, 160) || '(empty reply)',
           override,
           ...(override ? { note: `agent signalled ${completion.status} but coordinator routed ${decision.action}` } : {}),
           ...(decision.targetAgent ? { targetAgent: decision.targetAgent } : {}),

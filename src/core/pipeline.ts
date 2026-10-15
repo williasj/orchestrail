@@ -12,7 +12,7 @@ import {
   HANDOFF_FOOTER, MAX_REWINDS_PER_STAGE,
   MAX_PIPELINE_ESCALATIONS,
 } from '../utils/config.js'
-import { extractCodeBlock, extractCodeFromToolCalls } from '../utils/text.js'
+import { extractCodeBlock, extractCodeFromToolCalls, wroteWorkbenchSlot } from '../utils/text.js'
 import {
   workbenchIdStorage, wbIdToConversationId,
   wbGet, wbSet, wbList, wbClear,
@@ -253,7 +253,12 @@ export async function executePipeline(
           // it with narration is what let an un-run "test report" reach synthesis and be
           // reported as passing. If the test-engineer never writes it, it stays empty and
           // synthesis reports that verification did not complete.
-          if (stage.name === 'Implementation' || stage.assignee === 'senior-engineer') {
+          const stageMsgs = (result as { _messages?: AgenticMessage[] })._messages ?? []
+          if ((stage.name === 'Implementation' || stage.assignee === 'senior-engineer') &&
+              wroteWorkbenchSlot(stageMsgs, 'implementation')) {
+            implementationCode = wbGet('implementation') ?? implementationCode
+            console.log(`[pipeline] Implementation slot written by the agent (${implementationCode?.length ?? 0} bytes) -- kept as is`)
+          } else if (stage.name === 'Implementation' || stage.assignee === 'senior-engineer') {
             let extractedCode = extractCodeBlock(result.output)
             if (!extractedCode) {
               const toolCode = extractCodeFromToolCalls(
@@ -344,8 +349,10 @@ export async function executePipeline(
         callbacks.onFixDone(escalateTarget, fixResult)
         allResults.push(fixResult)
         lastFix = fixResult.output
-        const fixedCode = extractCodeBlock(fixResult.output)
-          ?? extractCodeFromToolCalls((fixResult as { _messages?: AgenticMessage[] })._messages ?? [])
+        const fixMsgs   = (fixResult as { _messages?: AgenticMessage[] })._messages ?? []
+        const fixedCode = wroteWorkbenchSlot(fixMsgs, 'implementation')
+          ? wbGet('implementation')
+          : (extractCodeBlock(fixResult.output) ?? extractCodeFromToolCalls(fixMsgs))
         if (fixedCode) {
           implementationCode = fixedCode
           wbSet('implementation', fixedCode)

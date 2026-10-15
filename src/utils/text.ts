@@ -141,7 +141,6 @@ export function stripCodeBlocks(text: string): string {
  * 'implementation' slot, with a fenced code block in the stage output as the next.
  */
 export function extractCodeFromToolCalls(messages: AgenticMessage[]): string | null {
-  let firstAnyWrite: string | null = null
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg?.role === 'assistant' && msg.tool_calls) {
@@ -153,14 +152,37 @@ export function extractCodeFromToolCalls(messages: AgenticMessage[]): string | n
             if (!content) continue
             const p = String(args.path ?? '').toLowerCase()
             const looksTest = /(^|[\/_.-])test/.test(p) || p.startsWith('__skill_')
-            if (!looksTest) return content          // prefer the implementation file
-            if (firstAnyWrite === null) firstAnyWrite = content
+            // Test files are never implementation code: returning one here is
+            // what filled the implementation slot with a pytest file.
+            if (!looksTest) return content
           } catch {}
         }
       }
     }
   }
-  return firstAnyWrite
+  return null
+}
+
+/**
+ * True when the agent itself called workbench_write(slot=<slot>) successfully
+ * during this run. When it did, the slot holds exactly what the agent intended
+ * and must not be overwritten by code scraped from its prose or tool calls.
+ */
+export function wroteWorkbenchSlot(messages: AgenticMessage[], slot: string): boolean {
+  const ids = new Set<string>()
+  for (const msg of messages) {
+    if (msg?.role !== 'assistant' || !msg.tool_calls) continue
+    for (const tc of msg.tool_calls) {
+      if (tc.function?.name !== 'workbench_write') continue
+      try {
+        const args = JSON.parse(tc.function.arguments || '{}')
+        if (args.slot === slot && typeof args.content === 'string' && args.content.trim()) ids.add(tc.id)
+      } catch {}
+    }
+  }
+  if (!ids.size) return false
+  return messages.some(m => m?.role === 'tool' && ids.has((m as { tool_call_id?: string }).tool_call_id ?? '') &&
+    /"ok"\s*:\s*true/.test(String(m.content ?? '')))
 }
 
 // -- JSON extraction -----------------------------------------------------------

@@ -160,10 +160,17 @@ export async function decomposeGoal(goal: string): Promise<DecomposeResult> {
   }
 
   const systemPrompt = coordinatorSystem(() => agents(), coordinator) + pastPatternsBlock
-  const raw = await callCoordinatorLLM([
-    { role: 'system', content: systemPrompt },
-    { role: 'user',   content: `Decompose this goal. Use PIPELINE mode for any coding or implementation task.\n\nGoal: ${goal}\n\nRespond ONLY with JSON in a \`\`\`json code fence.` },
-  ], 8192)   // thinking + JSON: 2048 could truncate on larger goals
+  // Two attempts: a sampled reply occasionally fails to parse, and the old last
+  // resort (every agent works the whole goal in parallel) wrecked coding tasks.
+  let raw = ''
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    raw = await callCoordinatorLLM([
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: `Decompose this goal. Use PIPELINE mode for any coding or implementation task.\n\nGoal: ${goal}\n\nRespond ONLY with JSON in a \`\`\`json code fence.` },
+    ], 8192)   // thinking + JSON: 2048 could truncate on larger goals
+    if (parsePipelineSpec(raw)?.length || parseTaskSpecs(raw)?.length) break
+    console.warn(`[decompose] attempt ${attempt} unparseable (${raw.length} chars): ${raw.replace(/\s+/g, ' ').slice(0, 300)}`)
+  }
   const durationMs = Date.now() - t0
 
   // Try pipeline first
@@ -215,7 +222,21 @@ export async function decomposeGoal(goal: string): Promise<DecomposeResult> {
     return { mode: 'dag', specs }
   }
 
-  // Last resort — one task per agent
+  // Last resort: the standard staged pipeline (every agent that has a stage, in
+  // order). Handing the whole goal to every agent in parallel meant the reviewer
+  // and test engineer ran before any code existed.
+  const staged = pipelineAgents().filter(a => a.order != null && a.stageName)
+  if (staged.length > 0) {
+    const stages: PipelineStage[] = staged.map(a => ({ name: a.stageName!, assignee: a.name, description: goal, maxRetries: 3 }))
+    appendToolLog({
+      ts: Date.now(), agent: 'coordinator', tool: 'decompose',
+      args: { goal: goal.slice(0, 500) },
+      result: JSON.stringify({ mode: 'pipeline', note: 'fallback -- decomposition unparseable, standard pipeline',
+        stages: stages.map(st => ({ name: st.name, assignee: st.assignee })), raw: raw.slice(0, 400) }),
+      ok: false, durationMs,
+    })
+    return { mode: 'pipeline', stages }
+  }
   const agentList = agents()
   const fallbackSpecs = agentList.map(a => ({
     title:       `${a.name}: ${goal.slice(0, 60)}`,
@@ -226,7 +247,7 @@ export async function decomposeGoal(goal: string): Promise<DecomposeResult> {
   appendToolLog({
     ts: Date.now(), agent: 'coordinator', tool: 'decompose',
     args: { goal: goal.slice(0, 500) },
-    result: JSON.stringify({ mode: 'dag', note: 'fallback — one task per agent', tasks: fallbackSpecs.map(s => s.assignee) }),
+    result: JSON.stringify({ mode: 'dag', note: 'fallback -- one task per agent', tasks: fallbackSpecs.map(sp => sp.assignee), raw: raw.slice(0, 400) }),
     ok: false, durationMs,
   })
   return { mode: 'dag', specs: fallbackSpecs }

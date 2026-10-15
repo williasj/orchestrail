@@ -189,7 +189,7 @@ export function createCoordinatorRoute(deps: CoordinatorRouteDeps): CoordinatorR
           `## Workbench artifacts (ground truth -- trust this over any claim that work is missing or empty)\n${slotManifest}\n\n` +
           `Agent signal: ${agentSignal}\n\n` +
           `Stage output (first 2000 chars):\n${stageOutput.slice(0, 2000)}${stageOutput.length > 2000 ? '\n...' : ''}\n\n` +
-          `What is your routing decision?`
+          `What is your routing decision? Reply with the decision line only, as plain text -- do not call any tools.`
       },
     ], 256) } catch (e) {
       // A routing failure must not abort the run: the stage signalled DONE, so advance.

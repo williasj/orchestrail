@@ -1,0 +1,11 @@
+Implement a Fibonacci calculator in Python. Requirements:    
+    
+1.  A function `fibonacci(n, memo=None)` that returns the nth Fibonacci number using memoization, where F(0)=0 and F(1)=1. The `memo` parameter must be optional and support being passed in externally to enable cross-call cache reuse.    
+        
+2.  A function `generate_sequence(count)` that returns a list of the first `count` Fibonacci numbers.    
+        
+3.  Handle edge cases: negative inputs, non-integer inputs, and boolean inputs `TrueFalse`) must raise a `ValueError` with a descriptive message. Include a warning when `n` exceeds Python's default recursion limit.    
+        
+4.  Docstrings on all public functions.    
+        
+5.  A runnable `__main__` block that prints the first 20 Fibonacci numbers using `generate_sequence`.

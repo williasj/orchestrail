@@ -489,7 +489,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
 
       let resp
       try {
-        resp = await callLLMRaw(reaskMessages, llm, maxTokens, 0, [useSkillDef])
+        resp = await callLLMRaw(reaskMessages, llm, maxTokens, 0, [useSkillDef], `orchestrail/${spec.assignee}`)
       } catch (err) {
         console.warn(`[verify-reask] ${spec.assignee}: re-ask LLM call failed: ${err instanceof Error ? err.message : String(err)}`)
         return
@@ -521,7 +521,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
         return { assignee: spec.assignee, title: spec.title, output: '(aborted)', success: false }
       }
 
-      const response = await callLLMRaw(messages, llm, maxTokens, temperature, toolDefs.length ? toolDefs : undefined)
+      const response = await callLLMRaw(messages, llm, maxTokens, temperature, toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`)
       const choice   = response.choices[0]
       if (!choice) break
 

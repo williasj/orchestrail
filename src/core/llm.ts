@@ -31,6 +31,7 @@ export async function callLLMRaw(
   maxTokens: number,
   temperature: number,
   tools?: unknown[],
+  requester = 'orchestrail',
 ): Promise<LLMResponse> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -38,6 +39,12 @@ export async function callLLMRaw(
   }
   if (llm.provider === 'anthropic') {
     headers['anthropic-version'] = '2023-06-01'
+  }
+  // Names this call in the GPU broker's queue, request history and Sources
+  // tab (e.g. orchestrail/senior-engineer). Only sent to local/custom
+  // endpoints; plain Ollama and other OpenAI-compatible servers ignore it.
+  if (llm.provider !== 'anthropic' && llm.provider !== 'openai') {
+    headers['X-Broker-Requester'] = requester.slice(0, 64)
   }
   const body: Record<string, unknown> = { model: llm.model, messages, temperature, max_tokens: maxTokens }
   if (tools && tools.length > 0) body['tools'] = tools
@@ -65,8 +72,9 @@ export async function callLLM(
   llm: AgentLLM,
   maxTokens: number,
   temperature: number,
+  requester = 'orchestrail',
 ): Promise<string> {
-  const data = await callLLMRaw(messages, llm, maxTokens, temperature)
+  const data = await callLLMRaw(messages, llm, maxTokens, temperature, undefined, requester)
   return data.choices[0]?.message?.content ?? ''
 }
 
@@ -87,5 +95,5 @@ export async function callCoordinatorLLM(messages: ChatMessage[], maxTokens = 20
   const flagged = prefix
     ? messages.map(m => m.role === 'system' ? { ...m, content: prefix + m.content } : m)
     : messages
-  return callLLM(flagged, coordinator.llm, maxTokens, 0)
+  return callLLM(flagged, coordinator.llm, maxTokens, 0, 'orchestrail/coordinator')
 }

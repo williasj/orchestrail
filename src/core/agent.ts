@@ -402,6 +402,28 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
     // report has no counts (it once wrote only the __main__ printout after a
     // 22-test run, and the reviewer escalated four times).
     let lastTestRun: { out: string; exit: number; passed: boolean } | null = null
+    // Tests that failed during this stage and have not been shown passing since.
+    // The latest green run used to be enough, so a failing test could simply be
+    // dropped from the next run (a real RecursionError bug was hidden that way).
+    // Keyed by test method name so skill and bash runs line up.
+    const unresolvedFailures = new Set<string>()
+    const testKey = (n: string) => String(n).split(/[.:]+/).filter(Boolean).pop() ?? String(n)
+    function trackTestOutcomes(rows: Array<{ name: string; ok: boolean }>): void {
+      for (const r of rows) {
+        const k = testKey(r.name)
+        if (!k) continue
+        if (r.ok) unresolvedFailures.delete(k); else unresolvedFailures.add(k)
+      }
+    }
+    function testOutcomesFromText(out: string): Array<{ name: string; ok: boolean }> {
+      const rows: Array<{ name: string; ok: boolean }> = []
+      for (const m of out.matchAll(/^(\w+) \(([\w.]+)\)(?:\n[^\n]*?)? \.\.\. (ok|FAIL|ERROR|skipped.*)$/gm))
+        if (!m[3]!.startsWith('skipped')) rows.push({ name: m[1]!, ok: m[3] === 'ok' })
+      for (const m of out.matchAll(/^(FAIL|ERROR): (\w+) \(/gm)) rows.push({ name: m[2]!, ok: false })
+      for (const m of out.matchAll(/^(\S+::\S+) (PASSED|FAILED|ERROR)\b/gm)) rows.push({ name: m[1]!, ok: m[2] === 'PASSED' })
+      for (const m of out.matchAll(/^(FAILED|ERROR) (\S+::\S+)/gm)) rows.push({ name: m[2]!, ok: false })
+      return rows
+    }
     const TEST_RUN_RE   = /\bRan \d+ tests? in\b|\b\d+ passed\b|\bcollected \d+ items?\b|\bno tests ran\b/
     const TEST_FAIL_RE  = /\bFAILED\b|\b[1-9]\d* (failed|errors?)\b|\b(failures|errors)=[1-9]|\bcollected 0 items\b|\bno tests ran\b|\bRan 0 tests\b/
     function reconcileTestReport(): void {
@@ -651,6 +673,13 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
                 escalationReason = `Verification did not pass: ${lastExecutionDetail || 'execution reported failures'}. `
                   + 'Fix the implementation and re-verify (re-run the skill or re-run via bash) before completing.'
                 console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (verification failed: ${lastExecutionDetail})`)
+              } else if (unresolvedFailures.size > 0) {
+                const names = [...unresolvedFailures].slice(0, 8).join(', ')
+                completionStatus = 'ESCALATE'
+                escalationReason = `Tests failed during verification and were never shown passing afterwards: ${names}. `
+                  + 'A later run that leaves them out does not count. Either the implementation is wrong (fix it and re-run '
+                  + 'the FULL suite) or the test was wrong (correct it and re-run it so it passes).'
+                console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (unresolved failing tests: ${names})`)
               }
             }
 
@@ -684,6 +713,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
               const out = `${parsed.stdout ?? ''}\n${parsed.stderr ?? ''}`
               if (TEST_RUN_RE.test(out)) {
                 lastTestRun = { out, exit: lastBashExitCode, passed: lastBashExitCode === 0 && !TEST_FAIL_RE.test(out) }
+                trackTestOutcomes(testOutcomesFromText(out))
               }
             } catch { lastBashExitCode = 1 }
             // Outcome gate: bash is a real execution. A test run decides it; other
@@ -701,6 +731,10 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
           if (tc.function.name === 'use_skill') {
             executionAttempted = true
             executionPassed    = skillResultPassed(result)
+            try {
+              const tests = (JSON.parse(result) as { result?: { tests?: Array<{ name?: string; outcome?: string }> } }).result?.tests
+              if (Array.isArray(tests)) trackTestOutcomes(tests.map(t => ({ name: String(t.name ?? ''), ok: t.outcome === 'passed' })))
+            } catch { /* not a test result */ }
             if (!executionPassed) lastExecutionDetail = skillResultDetail(result)
             // Authoritative test_report floor. When a verification agent self-executes
             // (use_skill) and then write-and-stops -- never reaching its own

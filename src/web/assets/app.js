@@ -17,6 +17,7 @@ var TOOL_SCHEMAS = {
   openai_tools: [['url','Endpoint URL'],['apiKey','API Key']],
   rag_manager:  [['url','RAG Manager URL']],
   searxng:      [['url','SearXNG Base URL']],
+  aiwiki:       [],
   self_improve: [],
 };
 
@@ -1878,6 +1879,60 @@ var chatConvList     = [];     // ConversationMeta[] for sidebar
 
 // -- Sidebar -----------------------------------------------------------------
 
+// -- AIWiki project binding -----------------------------------------------------
+// The selected project is the conversation's bound project: agents see and
+// write only that project's memory. Chosen here by the user, never by a model.
+
+var chatProject  = null;
+var chatProjects = [];
+
+function chatLoadProjects() {
+  apiFetch('/api/wiki/status').then(function(r){ return r.json(); }).then(function(st) {
+    var bar = document.getElementById('chat-project-bar');
+    if (!st || !st.enabled) { bar.style.display = 'none'; return; }
+    bar.style.display = 'flex';
+    return apiFetch('/api/wiki/projects').then(function(r){ return r.json(); }).then(function(list) {
+      chatProjects = Array.isArray(list) ? list.map(function(p){ return p.project; }) : [];
+      renderChatProjectSelect();
+    });
+  }).catch(function(){});
+}
+
+function renderChatProjectSelect() {
+  var sel = document.getElementById('chat-project-select');
+  if (!sel) return;
+  var names = chatProjects.slice();
+  if (chatProject && names.indexOf(chatProject) === -1) names.unshift(chatProject);
+  sel.innerHTML = '<option value="">No project (general)</option>' +
+    names.map(function(n){ return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') +
+    '<option value="__new__">+ New project...</option>';
+  sel.value = chatProject || '';
+  var hint = document.getElementById('chat-project-hint');
+  if (hint) hint.textContent = chatProject
+    ? 'Agents read and update this project\'s memory; other projects are hidden.'
+    : 'Agents can see all your projects but write to none.';
+}
+
+function chatProjectChanged() {
+  var sel = document.getElementById('chat-project-select');
+  var v = sel.value;
+  if (v === '__new__') {
+    var name = window.prompt('New project name (letters, digits, dashes):', '');
+    var slug = (name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+    if (!slug) { renderChatProjectSelect(); return; }
+    if (chatProjects.indexOf(slug) === -1) chatProjects.unshift(slug);
+    v = slug;
+  }
+  chatProject = v || null;
+  renderChatProjectSelect();
+  if (currentConvId) {
+    apiFetch('/api/conversations/' + encodeURIComponent(currentConvId) + '/project', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: chatProject })
+    }).then(function(){ loadChatConvList(); }).catch(function(){});
+  }
+}
+
 function loadChatConvList() {
   apiFetch('/api/conversations')
     .then(function(r){ return r.json(); })
@@ -1900,7 +1955,7 @@ function renderChatSidebar() {
     var date   = c.lastActive ? c.lastActive.slice(0,10) : '';
     return '<div class="chat-conv-item' + active + '" onclick="chatOpenConv(' + esc(JSON.stringify(c.id)) + ')">' +
       '<div class="chat-conv-title">' + esc(c.title || 'Untitled') + '</div>' +
-      '<div class="chat-conv-meta">' + esc(date) + '</div>' +
+      '<div class="chat-conv-meta">' + esc(date) + (c.project ? ' &middot; ' + esc(c.project) : '') + '</div>' +
     '</div>';
   }).join('');
 }
@@ -1908,6 +1963,9 @@ function renderChatSidebar() {
 function chatOpenConv(convId) {
   if (chatStreaming) return;
   currentConvId = convId;
+  var meta = chatConvList.filter(function(c){ return c.id === convId; })[0];
+  chatProject = (meta && meta.project) || null;
+  renderChatProjectSelect();
   chatMessages  = [];
   renderChatSidebar();
   renderChatMessages();
@@ -2143,7 +2201,7 @@ function chatSend() {
   // Show typing indicator
   chatAppendStreamingBubble();
 
-  var body = JSON.stringify({ message: msg, conversationId: currentConvId || undefined });
+  var body = JSON.stringify({ message: msg, conversationId: currentConvId || undefined, project: chatProject });
   var streamContent = '';
 
   fetch('/api/chat', {
@@ -2182,6 +2240,7 @@ function chatSend() {
               if (!currentConvId) {
                 currentConvId = evt.conversationId;
               }
+              if (evt.project !== undefined) { chatProject = evt.project || null; renderChatProjectSelect(); }
             } else if (evt.type === 'chunk') {
               streamContent += evt.content;
               chatUpdateStreamingBubble(streamContent);
@@ -2235,6 +2294,7 @@ function chatInputResize(el) {
 
 // Wire TAB_LOADERS
 TAB_LOADERS['chat'] = function() {
+  chatLoadProjects();
   loadChatConvList();
 };
 

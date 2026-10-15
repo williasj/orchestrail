@@ -74,6 +74,13 @@
       <!-- Main chat area -->
       <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg);">
 
+        <!-- AIWiki project binding -->
+        <div id="chat-project-bar" style="display:none;padding:8px 20px;border-bottom:1px solid var(--border);background:var(--surface);align-items:center;gap:10px;font-size:12px;">
+          <span style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);">Project</span>
+          <select id="chat-project-select" onchange="chatProjectChanged()" style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:12px;padding:4px 8px;min-width:200px;"></select>
+          <span id="chat-project-hint" style="color:var(--text-muted);font-size:11px;"></span>
+        </div>
+
         <!-- Message history -->
         <div id="chat-messages" style="
           flex:1;overflow-y:auto;padding:24px 28px;
@@ -651,6 +658,7 @@
           <option value="rag_manager">rag_manager</option>
           <option value="searxng">searxng</option>
           <option value="self_improve">Self-Improvement</option>
+          <option value="aiwiki">AIWiki (URL and token from server env)</option>
         </select>
       </div>
       <div id="tool-config-fields"></div>

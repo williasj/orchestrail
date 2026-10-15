@@ -5,6 +5,7 @@
 // truncation is the failure mode that produces a run which looks fine and
 // rebuilds work it already finished.
 
+import { btWikiContext } from './wiki.js'
 import { readProjectMd, readBrief, readDecisions, readTasks, renderTasksMd, readHandoff } from './store.js'
 import { btBash, btWorkbenchRunId } from './execClient.js'
 import { BT_RECON_PROMPT_MAX_PCT, BT_DECISIONS_MAX_LINES, BT_HANDOFF_MAX_BYTES } from './config.js'
@@ -37,6 +38,11 @@ export async function assembleReconstructionPrompt(
   parts.push('## PROJECT.md\n' + readProjectMd(slug))
   parts.push('## BRIEF.md\n' + readBrief(slug, runNo))
   parts.push('## DECISIONS.md\n' + capLines(readDecisions(slug), BT_DECISIONS_MAX_LINES))
+
+  // AIWiki: this project's long-term memory + relevant shared lessons/playbooks
+  const wikiQuery = currentTask ? `${currentTask.title}\n${currentTask.verify}` : readBrief(slug, runNo).slice(0, 400)
+  const wikiCtx = await btWikiContext(slug, runNo, wikiQuery)
+  if (wikiCtx) parts.push(wikiCtx)
 
   const tasks = readTasks(slug, runNo)
   parts.push('## tasks.md\n' + renderTasksMd(tasks))

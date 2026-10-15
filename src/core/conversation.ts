@@ -99,6 +99,7 @@ export interface ConversationMeta {
   title:       string
   createdAt:   string
   lastActive:  string
+  project?:    string   // AIWiki project slug this conversation is bound to
 }
 
 export interface StoredMessage {
@@ -326,4 +327,31 @@ export function deleteConversation(userId: string, convId: string): boolean {
     console.warn('[conversation] Failed to delete', convId, e instanceof Error ? e.message : String(e))
     return false
   }
+}
+
+
+// -- Project binding (AIWiki) ------------------------------------------------
+// Set by the user (chat project picker / API), never by a model. The bound
+// project scopes what the conversation's agents can see and write in the wiki.
+
+function metaPath(userId: string, convId: string): string {
+  return path.join(convDir(userId.toLowerCase() || '_anonymous', convId), 'meta.json')
+}
+
+export function getConversationProject(userId: string, convId: string): string | null {
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath(userId, convId), 'utf8')) as ConversationMeta
+    return meta.project || null
+  } catch { return null }
+}
+
+export function setConversationProject(userId: string, convId: string, project: string | null): boolean {
+  const file = metaPath(userId, convId)
+  try {
+    const meta = JSON.parse(fs.readFileSync(file, 'utf8')) as ConversationMeta
+    if (project) meta.project = project
+    else delete meta.project
+    fs.writeFileSync(file, JSON.stringify(meta, null, 2))
+    return true
+  } catch { return false }
 }

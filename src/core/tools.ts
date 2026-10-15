@@ -48,6 +48,7 @@ function agentMap(): Map<string, TeamAgent> {
 // appendToolLog reads it automatically so no call-site changes are needed.
 export type { ToolLogRequestContext } from './toolcontext.js'
 import { toolLogContextStorage } from './toolcontext.js'
+import { buildWikiTools, executeWikiTool, WIKI_SENTINEL, WIKI_TOOL_NAMES } from './wikitools.js'
 export { toolLogContextStorage }
 
 // Tool log is now disk-backed per conversation via conversation.ts.
@@ -285,6 +286,12 @@ export async function fetchAgentTools(agent: TeamAgent): Promise<{ defs: unknown
     urlMap.set('use_skill',    SKILL_SENTINEL)
     urlMap.set('create_skill', SKILL_SENTINEL)
   }
+  // Inject AIWiki tools when the agent has a tool of type 'aiwiki' assigned
+  if (assignedTools.some(t => t.type === 'aiwiki')) {
+    defs.push(...buildWikiTools())
+    for (const n of WIKI_TOOL_NAMES) urlMap.set(n, WIKI_SENTINEL)
+  }
+
   // Inject self-improvement tools when the agent has the 'self-improve' tool grant
   const hasSelfImprove = assignedTools.some(t => t.type === 'self_improve')
   if (hasSelfImprove) {
@@ -755,6 +762,9 @@ export async function executeToolCall(
   const tools = _deps?.getTools() ?? []
   const url = urlMap.get(name)
   if (!url) return JSON.stringify({ error: `No tool registered for function: ${name}` })
+
+  // AIWiki sentinel
+  if (url === WIKI_SENTINEL) return executeWikiTool(name, args, agentName)
 
   // Workbench sentinel
   if (url === WORKBENCH_SENTINEL) {

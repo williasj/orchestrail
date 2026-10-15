@@ -28,7 +28,7 @@ export function registerBulletTrainRoutes(app: Express): void {
     if (!brief || !brief.trim()) { res.status(400).json({ error: 'brief (MD instruction set content) is required' }); return }
     if (projectExists(slug)) { res.status(409).json({ error: `project '${slug}' already exists` }); return }
 
-    const project = createProject(slug, title.trim(), brief)
+    const project = createProject(slug, title.trim(), brief, undefined, req.auth?.email)
     res.status(201).json({ project })
   })
 

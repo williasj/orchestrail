@@ -8,6 +8,7 @@
 // mid-session; the supervisor also runs verify independently after the session
 // ends, so the agent's own bt_verify calls are a convenience, never authority.
 
+import { btWikiDecision } from './wiki.js'
 import { btBash, btWriteFile, btReadFile, btListFiles, btWorkbenchRunId } from './execClient.js'
 import { writeHandoff, appendDecision, decisionsAtCap, readTasks } from './store.js'
 import { runVerify } from './verify.js'
@@ -17,7 +18,12 @@ export function buildBtTools(): unknown[] {
   return [
     { type: 'function', function: {
       name: 'bash',
-      description: 'Run a bash command in this project\'s working directory. State persists across calls: files stay, installed packages stay. Returns { stdout, stderr, exit_code }.',
+      description: 'Run a bash command in this project\'s working directory (Ubuntu 24.04). State persists across calls: files stay, installed packages stay. Returns { stdout, stderr, exit_code }. ' +
+        'Installed: python3 in a venv (pip install works) with pytest, numpy, pandas, scipy, matplotlib (headless; savefig, never show), ' +
+        'python-docx, python-pptx, openpyxl, pypdf, pdfplumber, reportlab, pillow, requests, httpx, beautifulsoup4, lxml, pyyaml, ' +
+        'jsonschema, pydantic, ruff, mypy; node 20 with npm, typescript (tsc), tsx, eslint, prettier; go, rustc/cargo, java (javac), ' +
+        'gcc/g++/make/cmake; libreoffice (soffice --headless --convert-to pdf), pandoc, pdftotext/pdftoppm, qpdf, imagemagick, ffmpeg; ' +
+        'git, jq, sqlite3, ripgrep (rg), shellcheck, zip/unzip, curl. The public internet is reachable; the local network is not.',
       parameters: { type: 'object', properties: {
         command: { type: 'string' }, stdin: { type: 'string' },
       }, required: ['command'] },
@@ -90,6 +96,7 @@ export async function dispatchBtTool(name: string, args: Record<string, unknown>
   }
   if (name === 'bt_decision') {
     const r = appendDecision(ctx.slug, ctx.runNo, String(args.line ?? ''))
+    if (r.ok) btWikiDecision(ctx.slug, ctx.runNo, String(args.line ?? ''))
     return JSON.stringify(r)
   }
   if (name === 'bt_verify') {

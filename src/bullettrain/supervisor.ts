@@ -10,8 +10,9 @@
 // Also cut for the alpha: no task fission, no full_suite_every_session, no
 // acceptance-criteria gate/replan. DONE = every task verified or manual.
 
+import { btWikiRunEnd, btWikiRunStart } from './wiki.js'
 import {
-  readProject, writeProject, readRuntime, readStatus, writeStatus, readTasks, writeTasks,
+  listProjects, readProject, writeProject, readRuntime, readStatus, writeStatus, readTasks, writeTasks,
   writeReport, writeSessionRecord, nextRunNo, readBrief, writeDeliverableZip,
 } from './store.js'
 import { btExecHealthy, btBash, btWorkbenchRunId } from './execClient.js'
@@ -63,6 +64,7 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
   try {
     // -- recon --------------------------------------------------------------
     status.state = 'running'
+    await btWikiRunStart(slug, runNo, readBrief(slug, runNo))
     setPhase(status, 'recon', 'Checking exec sidecar')
     if (!(await btExecHealthy())) {
       halt(status, 'exec_unreachable', 'orchestrail-exec health check failed')
@@ -85,7 +87,7 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
     setPhase(status, 'plan', 'Planning tasks from BRIEF.md')
     let tasks: BTTask[]
     try {
-      tasks = await planTasks(readBrief(slug, runNo), runtime, runtime.max_tasks)
+      tasks = await planTasks(readBrief(slug, runNo), runtime, runtime.max_tasks, `bullettrain/${slug}`)
     } catch (err) {
       const msg = String(err instanceof Error ? err.message : err)
       const reason: BTHaltReason = /exceeds max_tasks/.test(msg) ? 'task_cap' : 'no_tasks'
@@ -222,8 +224,40 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
       p.current_run = null
       writeProject(p)
     }
+    try { await btWikiRunEnd(slug, runNo, readStatus(slug, runNo), readTasks(slug, runNo)) } catch { /* best effort */ }
   }
 }
+
+/**
+ * The supervisor runs in-process, so an Orchestrail restart kills any run in
+ * flight without updating its state and the project stays locked ("run already
+ * in progress"). Called once at startup, before any new run can begin: every
+ * project whose current_run is still queued/running is halted with reason
+ * orchestrail_restart and unlocked so a new run can be started.
+ */
+export function recoverStrandedRuns(): number {
+  let recovered = 0
+  for (const p of listProjects()) {
+    if (!p.current_run) continue
+    const runNo = p.current_run
+    try {
+      const st = readStatus(slug(p), runNo)
+      if (st.state === 'running' || st.state === 'queued') {
+        halt(st, 'orchestrail_restart', `Orchestrail restarted while this run was ${st.state} (phase ${st.phase ?? 'unknown'}); start a new run to continue`)
+        btWikiRunEnd(p.slug, runNo, st, readTasks(p.slug, runNo)).catch(() => {})
+        recovered++
+      }
+    } catch (e) {
+      console.warn(`[bullettrain] could not read status for ${p.slug} run ${runNo}: ${e}`)
+    }
+    const fresh = readProject(p.slug)
+    if (fresh && fresh.current_run === runNo) { fresh.current_run = null; writeProject(fresh) }
+  }
+  if (recovered) console.warn(`[bullettrain] recovered ${recovered} run(s) stranded by a restart`)
+  return recovered
+}
+
+function slug(p: { slug: string }): string { return p.slug }
 
 function buildReport(
   slug: string, runNo: string, tasks: BTTask[], status: BTStatus,

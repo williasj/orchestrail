@@ -76,6 +76,7 @@ export async function btCallLLM(
   messages: AgenticMessage[],
   runtime: BTRuntime,
   tools: unknown[],
+  requester = 'bullettrain',
 ): Promise<LLMResponse> {
   const maxTokens = Math.max(1024, Math.floor(runtime.num_ctx * 0.25))
   const body: Record<string, unknown> = {
@@ -91,7 +92,7 @@ export async function btCallLLM(
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${process.env.OPENAI_API_KEY || 'ollama'}`,
     // Identifies us in the broker's queue and lease display. Ignored elsewhere.
-    'X-Broker-Requester': 'bullettrain',
+    'X-Broker-Requester': requester.slice(0, 64),
     'X-Broker-Hold-Seconds': String(LLM_BROKER_HOLD_SECONDS),
   }
   const payload = JSON.stringify(body)

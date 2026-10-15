@@ -37,7 +37,7 @@ export interface TeamAgent {
 export interface ToolConfig {
   id: string
   name: string
-  type: 'qdrant_rag' | 'openai_tools' | 'rag_manager' | 'searxng' | 'self_improve'
+  type: 'qdrant_rag' | 'openai_tools' | 'rag_manager' | 'searxng' | 'self_improve' | 'aiwiki'
   enabled: boolean
   config: Record<string, string>
 }

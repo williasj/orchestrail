@@ -6,7 +6,7 @@ export type BTPhase = 'recon' | 'plan' | 'select' | 'session' | 'verify' | 'suit
 export type BTHaltReason =
   | 'brief_mismatch' | 'no_tasks' | 'task_cap' | 'all_blocked' | 'stall'
   | 'session_cap' | 'wall_clock' | 'manual_queue' | 'criteria_unmet'
-  | 'exec_unreachable' | 'llm_unreachable' | null
+  | 'exec_unreachable' | 'llm_unreachable' | 'orchestrail_restart' | null
 
 export interface BTRuntime {
   model: string
@@ -32,6 +32,7 @@ export interface BTProject {
   current_run: string | null
   last_run: string | null
   workspace_run_id: string
+  owner?: string            // user (email) who created the project; keys its AIWiki memory
 }
 
 export type BTTaskMark = ' ' | '>' | 'x' | '!' | '?' | '-'

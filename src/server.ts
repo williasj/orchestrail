@@ -42,7 +42,9 @@ import { registerAuthRoutes }        from './routes/auth.js'
 import { registerPipelinesRoutes }   from './routes/pipelines.js'
 import { registerCompletionsRoutes } from './routes/completions.js'
 import { registerBulletTrainRoutes } from './bullettrain/routes.js'
+import { recoverStrandedRuns }       from './bullettrain/supervisor.js'
 import { registerSkillRoutes }       from './routes/skills.js'
+import { registerWikiRoutes }        from './routes/wiki.js'
 import { initUsers }                 from './core/users.js'
 import type { TeamAgent, ToolConfig, CoordinatorConfig } from './types/index.js'
 
@@ -159,7 +161,9 @@ registerCompletionsRoutes(app, {
 // UI shell, and the orchestrail-exec sidecar. Does not touch AGENTS/TOOLS/
 // COORDINATOR and reads no core/ pipeline state.
 registerBulletTrainRoutes(app)
+recoverStrandedRuns()
 registerSkillRoutes(app, { exec: runCodeViaTool })
+registerWikiRoutes(app)
 
 // -- Start ---------------------------------------------------------------------
 

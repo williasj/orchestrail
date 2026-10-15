@@ -75,7 +75,7 @@ export function writeProject(project: BTProject): void {
   atomicWrite(projectJsonPath(project.slug), JSON.stringify(project, null, 2))
 }
 
-export function createProject(slug: string, title: string, briefContent: string, runtimeOverride?: Partial<BTRuntime>): BTProject {
+export function createProject(slug: string, title: string, briefContent: string, runtimeOverride?: Partial<BTRuntime>, owner?: string): BTProject {
   fs.mkdirSync(projectDir(slug), { recursive: true })
   const project: BTProject = {
     slug, title,
@@ -84,6 +84,7 @@ export function createProject(slug: string, title: string, briefContent: string,
     current_run: null,
     last_run: null,
     workspace_run_id: 'bt-' + slug,
+    ...(owner ? { owner } : {}),
   }
   writeProject(project)
   atomicWrite(projectMdPath(slug), briefContent)

@@ -2,6 +2,7 @@
 // Implements OpenAI-compatible /v1/chat/completions (and the /chat/completions
 // alias used by OpenWebUI's External connection mode).
 
+import { wikiAppendLog, wikiContextFor, wikiSlug, type WikiScope } from '../core/wikiclient.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { v4 as uuidv4 }     from 'uuid'
 import type { Request, Response, Router } from 'express'
@@ -15,7 +16,7 @@ import { executePipeline }     from '../core/pipeline.js'
 import { executeWithDeps, injectGoalIntoRootTasks } from '../core/dag.js'
 import { wbIdToConversationId } from '../core/workbench.js'
 import { toolLogContextStorage, getToolLog } from '../core/tools.js'
-import { touchConversation, appendMessage, getMessages } from '../core/conversation.js'
+import { touchConversation, appendMessage, getMessages, getConversationProject, setConversationProject } from '../core/conversation.js'
 import { MODEL_ID }             from '../utils/config.js'
 
 // Marker injected into clarification replies so follow-up turns are routed
@@ -530,7 +531,10 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     const { message, conversationId: clientConvId } = req.body as {
       message?: string
       conversationId?: string
+      project?: string | null
     }
+    const hasProjectField = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'project')
+    const requestedProject = (req.body as { project?: string | null }).project
     if (!message?.trim()) { res.status(400).json({ error: 'message is required' }); return }
 
     const userId = req.auth!.email
@@ -552,6 +556,13 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     touchConversation(userId, conversationId, goal)
     appendMessage(userId, conversationId, 'user', goal)
 
+    // AIWiki project binding: chosen by the user (picker / API), never the model
+    if (hasProjectField) {
+      setConversationProject(userId, conversationId, requestedProject ? wikiSlug(String(requestedProject)) || null : null)
+    }
+    const projectId = getConversationProject(userId, conversationId) || undefined
+    const wikiScope: WikiScope = { user: userId, project: projectId ?? null, agent: 'coordinator', conversation: conversationId }
+
     const phase      = detectPhase(messages as ChatMessage[])
     const generation = bumpGeneration()
     const runId      = uuidv4()
@@ -562,7 +573,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     // Send conversationId immediately so the client can store it for follow-up turns
-    res.write(`data: ${JSON.stringify({ type: 'init', conversationId, runId })}\n\n`)
+    res.write(`data: ${JSON.stringify({ type: 'init', conversationId, runId, project: projectId ?? null })}\n\n`)
 
     let responseBuffer = ''
     const sendChunk = (content: string) => {
@@ -580,7 +591,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     }
 
     await toolLogContextStorage.run(
-      { userId, conversationId },
+      { userId, conversationId, projectId },
       () => usageStorage.run({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, async () => {
       try {
         // Clarification phase
@@ -607,9 +618,14 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
             ? buildExecuteGoal(messages as ChatMessage[])
             : goal
 
+        // AIWiki context: bound project's memory + relevant pages (above a relevance cut-off)
+        const wikiCtx = await wikiContextFor(wikiScope, goal)
+        if (wikiCtx) sendChunk(`> **[coordinator]** AIWiki context loaded${projectId ? ` (project ${projectId})` : ''}\n`)
+        const teamGoal = wikiCtx ? `${fullGoal}\n\n${wikiCtx}` : fullGoal
+
         sendChunk('> **[coordinator]** decomposing goal...\n')
         const runStartTs = Date.now()
-        const decomposed = await decomposeGoal(fullGoal)
+        const decomposed = await decomposeGoal(teamGoal)
 
         let completedResults: AgentResult[]
         let wbSnapshot: Record<string, string> = {}
@@ -617,7 +633,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
 
         if (decomposed.mode === 'pipeline') {
           sendChunk(`> **[coordinator]** pipeline — ${decomposed.stages.length} stages\n\n`)
-          const pr = await executePipeline(decomposed.stages, fullGoal, generation, {
+          const pr = await executePipeline(decomposed.stages, teamGoal, generation, {
             onStageStart: (stage, attempt) => {
               sendChunk(`> **[${stage.assignee}]** ${stage.name}${attempt > 0 ? ` (retry ${attempt})` : ''}...\n`)
             },
@@ -639,7 +655,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
           wbSnapshot       = pr.wbSnapshot
           rewindCount      = pr.rewindCount
         } else {
-          injectGoalIntoRootTasks(decomposed.specs, fullGoal)
+          injectGoalIntoRootTasks(decomposed.specs, teamGoal)
           wbIdToConversationId.set('default', conversationId)
           sendChunk(`> **[coordinator]** ${decomposed.specs.length} task${decomposed.specs.length !== 1 ? 's' : ''} assigned\n\n`)
           completedResults = await executeWithDeps(decomposed.specs, {
@@ -655,13 +671,16 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
         }
 
         sendChunk('\n')
+        let finalText = ''
         if (completedResults.length === 1 && completedResults[0]) {
           const solo = completedResults[0]
+          finalText = solo.output
           sendChunk(`---\n\n${solo.output}`)
           sendChunk(`\n\n---\n*Agent: ${solo.assignee}*`)
         } else {
           sendChunk('> **[coordinator]** synthesizing...\n\n---\n\n')
-          const synthesis = await synthesize(fullGoal, completedResults, wbSnapshot)
+          const synthesis = await synthesize(teamGoal, completedResults, wbSnapshot)
+          finalText = synthesis
           sendChunk(synthesis)
           sendChunk(buildAgentsFooter(completedResults, usageStorage.getStore()?.total_tokens ?? 0))
           reflectAndStoreMetaMemory(fullGoal, decomposed.mode, [...new Set(completedResults.map(r => r.assignee))], synthesis, completedResults, rewindCount).catch(() => {})
@@ -675,6 +694,15 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
         }
 
         appendMessage(userId, conversationId, 'assistant', responseBuffer)
+
+        // Deterministic project write-back: every run in a bound conversation is logged
+        if (projectId) {
+          const agentsUsed = [...new Set(completedResults.map(r => r.assignee))].join(', ')
+          wikiAppendLog(wikiScope, goal.slice(0, 100),
+            `**Goal:** ${goal.slice(0, 600)}\n\n**Outcome:** ${finalText.slice(0, 900).trim()}${finalText.length > 900 ? ' ...' : ''}\n\n` +
+            `**Agents:** ${agentsUsed}  \n**Conversation:** ${conversationId}`,
+          ).catch(() => {})
+        }
         sendDone()
         bumpGeneration()
       } catch (err) {

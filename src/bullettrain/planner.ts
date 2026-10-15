@@ -46,7 +46,7 @@ function parsePlanJson(raw: string): PlanTaskRaw[] {
   })
 }
 
-export async function planTasks(brief: string, runtime: BTRuntime, maxTasks: number): Promise<BTTask[]> {
+export async function planTasks(brief: string, runtime: BTRuntime, maxTasks: number, requester = 'bullettrain'): Promise<BTTask[]> {
   const res = await btCallLLM(
     [
       { role: 'system', content: PLAN_SYSTEM_PROMPT },
@@ -54,6 +54,7 @@ export async function planTasks(brief: string, runtime: BTRuntime, maxTasks: num
     ],
     runtime,
     [],
+    requester,
   )
   const content = res.choices[0]?.message?.content ?? ''
   if (!content.trim()) throw new Error('planner returned empty response')

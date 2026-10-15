@@ -82,7 +82,7 @@ export async function runSession(
     turns++
     let res
     try {
-      res = await btCallLLM(messages, runtime, tools)
+      res = await btCallLLM(messages, runtime, tools, `bullettrain/${slug}`)
     } catch (err) {
       endReason = 'llm_error'
       return { record: buildRecord(), haltReason: 'llm_unreachable', reconOverBudget: false }

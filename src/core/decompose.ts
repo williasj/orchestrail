@@ -163,7 +163,7 @@ export async function decomposeGoal(goal: string): Promise<DecomposeResult> {
   const raw = await callCoordinatorLLM([
     { role: 'system', content: systemPrompt },
     { role: 'user',   content: `Decompose this goal. Use PIPELINE mode for any coding or implementation task.\n\nGoal: ${goal}\n\nRespond ONLY with JSON in a \`\`\`json code fence.` },
-  ])
+  ], 8192)   // thinking + JSON: 2048 could truncate on larger goals
   const durationMs = Date.now() - t0
 
   // Try pipeline first

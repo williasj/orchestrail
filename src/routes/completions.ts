@@ -131,6 +131,8 @@ export interface CompletionsDeps {
     llm: AgentLLM,
     maxTokens: number,
     temperature: number,
+    requester?: string,
+    extra?: Record<string, unknown>,
   ) => Promise<string>
 
   getCoordinator: () => CoordinatorConfig
@@ -291,7 +293,8 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     // WITHOUT persisting a conversation record.
     if (goal.startsWith('### Task:')) {
       const coordLLM  = getCoordinator().llm
-      const ghostReply = (await callLLM([{ role: 'user', content: goal }], coordLLM, 256, 0)).trim() || 'General'
+      const ghostReply = (await callLLM([{ role: 'user', content: goal }], coordLLM, 256, 0, 'orchestrail/coordinator',
+        coordLLM.provider !== 'anthropic' && coordLLM.provider !== 'openai' ? { reasoning_effort: 'none' } : undefined)).trim() || 'General'
       if (stream) {
         res.setHeader('Content-Type', 'text/event-stream')
         res.setHeader('Cache-Control', 'no-cache')

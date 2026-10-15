@@ -37,6 +37,15 @@ function agentMap(): Map<string, TeamAgent> {
   return new Map((_deps?.getAgents() ?? []).map(a => [a.name, a]))
 }
 
+/** Slot ownership, for routing fixes to an agent that can actually write the slot. */
+export function agentCanWriteSlot(agentName: string, slot: string): boolean {
+  const a = agentMap().get(agentName)
+  return !!a && !(a.readOnlySlots ?? []).includes(slot)
+}
+export function slotOwner(slot: string): string | null {
+  return (_deps?.getAgents() ?? []).find(a => (a.requiredOutputSlots ?? []).includes(slot))?.name ?? null
+}
+
 // -- Generation counter --------------------------------------------------------
 // Each new /v1/chat/completions request bumps this. runAgent checks it each
 // round and aborts if stale so superseded agents don't keep running.
@@ -386,6 +395,25 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
     let executionAttempted = false
     let executionPassed    = false
     let lastExecutionDetail = ''
+    // The most recent bash run that was a TEST run (unittest / pytest output). Its
+    // outcome is the verification signal: a later `ls` or `cat` must not turn a
+    // failed suite into a pass, and a `| tail` pipe must not hide failures behind
+    // exit 0. Also the evidence written to test_report when the model's own
+    // report has no counts (it once wrote only the __main__ printout after a
+    // 22-test run, and the reviewer escalated four times).
+    let lastTestRun: { out: string; exit: number; passed: boolean } | null = null
+    const TEST_RUN_RE   = /\bRan \d+ tests? in\b|\b\d+ passed\b|\bcollected \d+ items?\b|\bno tests ran\b/
+    const TEST_FAIL_RE  = /\bFAILED\b|\b[1-9]\d* (failed|errors?)\b|\b(failures|errors)=[1-9]|\bcollected 0 items\b|\bno tests ran\b|\bRan 0 tests\b/
+    function reconcileTestReport(): void {
+      if (!lastTestRun || !(agent?.requiredOutputSlots ?? []).includes('test_report')) return
+      const cur = (wbGet('test_report') ?? '').trim()
+      if (/\bRan \d+ tests?\b|\b\d+ (passed|failed)\b/.test(cur)) return
+      const block = `## Captured test run (recorded by the orchestrator)\n` +
+        `Outcome: ${lastTestRun.passed ? 'PASSED' : 'FAILED'} (exit ${lastTestRun.exit})\n\n` +
+        '```\n' + lastTestRun.out.slice(-3000).trim() + '\n```'
+      wbSet('test_report', cur ? `${cur}\n\n${block}` : block)
+      console.log(`[verify] ${spec.assignee}: test_report had no test counts -- appended the captured test run`)
+    }
 
     // Snapshot the capability-based verification outcome at return time. Used to
     // populate AgentResult.verification so the pipeline/synthesis hard-gate can tell
@@ -489,7 +517,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
 
       let resp
       try {
-        resp = await callLLMRaw(reaskMessages, llm, maxTokens, 0, [useSkillDef], `orchestrail/${spec.assignee}`)
+        resp = await callLLMRaw(reaskMessages, llm, maxTokens, temperature, [useSkillDef], `orchestrail/${spec.assignee}`)
       } catch (err) {
         console.warn(`[verify-reask] ${spec.assignee}: re-ask LLM call failed: ${err instanceof Error ? err.message : String(err)}`)
         return
@@ -589,6 +617,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
             // test-engineer that legitimately verified via use_skill, blocking the
             // happy path) with a single capability-agnostic path. Never upgrades an
             // explicit ESCALATE -- only the gate below may downgrade a DONE.
+            reconcileTestReport()
             await attemptDeterministicVerification()
 
             // Outcome-based verification gate (capability-agnostic). When an agent is
@@ -637,16 +666,23 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
           // deterministic python-run-tests run below, this is the secondary signal.
           if (tc.function.name === 'bash') {
             try {
-              const parsed = JSON.parse(result) as { exit_code?: number; stderr?: string; error?: string }
+              const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string; stderr?: string; error?: string }
               lastBashExitCode = typeof parsed.exit_code === 'number'
                 ? parsed.exit_code
                 : (parsed.error ? 1 : 0)
               lastBashStderr   = parsed.stderr ?? parsed.error ?? ''
+              const out = `${parsed.stdout ?? ''}\n${parsed.stderr ?? ''}`
+              if (TEST_RUN_RE.test(out)) {
+                lastTestRun = { out, exit: lastBashExitCode, passed: lastBashExitCode === 0 && !TEST_FAIL_RE.test(out) }
+              }
             } catch { lastBashExitCode = 1 }
-            // Outcome gate: bash is a real execution. Exit 0 = passed.
+            // Outcome gate: bash is a real execution. A test run decides it; other
+            // commands only count while no test run has happened yet.
             executionAttempted = true
-            executionPassed    = lastBashExitCode === 0
-            if (!executionPassed) lastExecutionDetail = lastBashStderr.slice(0, 300) || `bash exit ${lastBashExitCode}`
+            executionPassed    = lastTestRun ? lastTestRun.passed : lastBashExitCode === 0
+            if (!executionPassed) lastExecutionDetail = lastTestRun && !lastTestRun.passed
+              ? lastTestRun.out.slice(-300)
+              : (lastBashStderr.slice(0, 300) || `bash exit ${lastBashExitCode}`)
           }
           // Outcome gate: a use_skill invocation is also a real execution. The
           // wrapper `ok` only means the harness ran; the meaningful pass signal is

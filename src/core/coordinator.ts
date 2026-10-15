@@ -127,10 +127,16 @@ export function createCoordinatorRoute(deps: CoordinatorRouteDeps): CoordinatorR
     // ESCALATEs; specialist agents are explicitly instructed to only ESCALATE
     // for concrete blocking issues — trusting them is safer.
     if (completion.status === 'ESCALATE') {
+      const reason     = completion.escalation_reason ?? completion.summary ?? 'issue requires fix'
+      // The escalating agent usually says who must fix it ("test-engineer must re-run...").
+      // Without an escalateTo on the stage, everything used to land on the order-2 agent.
+      const escRe = (n: string) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
+      const named = agents.filter(a => a.name !== currentStage.assignee && a.name !== 'self-improvement'
+        && escRe(a.name).test(reason))
       const escalateTarget = currentStage.escalateTo
+        ?? (named.length === 1 ? named[0]!.name : undefined)
         ?? (agents.find(a => a.order === 2) ?? sorted[1])?.name
         ?? 'senior-engineer'
-      const reason     = completion.escalation_reason ?? completion.summary ?? 'issue requires fix'
       const durationMs = Date.now() - t0
       appendToolLog({
         ts: Date.now(), agent: 'coordinator', tool: 'route',

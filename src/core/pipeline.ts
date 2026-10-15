@@ -13,6 +13,7 @@ import {
   MAX_PIPELINE_ESCALATIONS,
 } from '../utils/config.js'
 import { extractCodeBlock, extractCodeFromToolCalls, wroteWorkbenchSlot } from '../utils/text.js'
+import { agentCanWriteSlot, slotOwner } from './agent.js'
 import {
   workbenchIdStorage, wbIdToConversationId,
   wbGet, wbSet, wbList, wbClear,
@@ -304,8 +305,25 @@ export async function executePipeline(
         }
 
         // ESCALATE — run fix agent then retry this stage
-        const escalateTarget = decision.targetAgent ?? stage.escalateTo
+        let   escalateTarget = decision.targetAgent ?? stage.escalateTo
         const escalateReason = decision.reason
+        // Route by slot ownership. A defect in a slot the chosen fixer may only READ
+        // (e.g. test_report -> senior-engineer) can never be fixed by it; one benchmark
+        // run burned four fix rounds that way. Send it to the slot's owner instead.
+        const FIX_SLOTS   = ['implementation', 'test_harness', 'test_report', 'blueprint', 'runtimes', 'review_report']
+        const namedSlots  = FIX_SLOTS.filter(sl => new RegExp(`\\b${sl}\\b`).test(escalateReason ?? ''))
+        if (escalateTarget && namedSlots.length && !namedSlots.some(sl => agentCanWriteSlot(escalateTarget!, sl))) {
+          const owner = namedSlots.map(sl => slotOwner(sl)).find(o => o && o !== stage.assignee)
+          if (owner && owner !== escalateTarget) {
+            console.log(`[pipeline] escalation names ${namedSlots.join(', ')} which ${escalateTarget} cannot write -- routing the fix to ${owner}`)
+            escalateTarget = owner
+          }
+        }
+        const fixWriteSlots = escalateTarget
+          ? (namedSlots.filter(sl => agentCanWriteSlot(escalateTarget!, sl) && sl !== 'review_report').length
+              ? namedSlots.filter(sl => agentCanWriteSlot(escalateTarget!, sl) && sl !== 'review_report')
+              : (agentCanWriteSlot(escalateTarget, 'implementation') ? ['implementation'] : []))
+          : []
 
         if (!escalateTarget || attempt >= maxRetries || totalEscalations >= MAX_PIPELINE_ESCALATIONS) {
           if (attempt >= maxRetries || totalEscalations >= MAX_PIPELINE_ESCALATIONS) callbacks.onMaxRetries(stage)
@@ -340,7 +358,11 @@ export async function executePipeline(
           title:       `Fix: ${stage.name}`,
           description: `## Goal\n\n${fullGoal}\n\n${fixImplSection}${fixReportSection}## Issue to Fix\n\n${escalateReason}\n\n` +
                        `## Your Task\n\nFix ONLY the issue described above. ` +
-                       `After fixing, you MUST: (1) verify it by running it -- write the code with write_file and run it with bash, or call use_skill with python-run-tests -- (2) call workbench_write with slot='implementation' and your fixed code. ` +
+                       `After fixing, you MUST: (1) verify it by running it -- write the code with write_file and run it with bash, or call use_skill with python-run-tests -- ` +
+                       (fixWriteSlots.length
+                         ? `(2) call workbench_write for ${fixWriteSlots.map(sl => `'${sl}'`).join(' and ')} with the corrected content` +
+                           (fixWriteSlots.includes('test_report') ? ` (test_report must contain the real test command output with its counts)` : '') + `. `
+                         : `(2) record what you verified. `) +
                        `Do not rewrite from scratch. Minimal targeted fix only.`,
           assignee:    escalateTarget,
           dependsOn:   [],
@@ -350,9 +372,12 @@ export async function executePipeline(
         allResults.push(fixResult)
         lastFix = fixResult.output
         const fixMsgs   = (fixResult as { _messages?: AgenticMessage[] })._messages ?? []
-        const fixedCode = wroteWorkbenchSlot(fixMsgs, 'implementation')
-          ? wbGet('implementation')
-          : (extractCodeBlock(fixResult.output) ?? extractCodeFromToolCalls(fixMsgs))
+        // Only an agent that may write the implementation can change it; a test-engineer's
+        // fix output is full of test code that must never be scraped into that slot.
+        const fixedCode = !agentCanWriteSlot(escalateTarget, 'implementation') ? null
+          : wroteWorkbenchSlot(fixMsgs, 'implementation')
+            ? wbGet('implementation')
+            : (extractCodeBlock(fixResult.output) ?? extractCodeFromToolCalls(fixMsgs))
         if (fixedCode) {
           implementationCode = fixedCode
           wbSet('implementation', fixedCode)

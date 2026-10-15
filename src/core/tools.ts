@@ -919,6 +919,12 @@ export async function executeToolCall(
     if (name === 'use_skill') {
       let skillName   = String(args['name'] ?? '')
       let skillInput  = args['input']
+      // Envelope auto-repair: models often send `input` as a JSON-encoded STRING
+      // ("{\"code\": ...}") instead of an object. Every python-run-tests call in a
+      // benchmark run failed this way ("input must be an object"). Decode it.
+      if (typeof skillInput === 'string' && /^\s*[{[]/.test(skillInput)) {
+        try { skillInput = JSON.parse(skillInput) } catch { /* leave as is; the skill reports it */ }
+      }
       // Envelope auto-repair: the model sometimes nests everything under `input`
       // and omits the top-level `name` (-> "name is required", a wasted round-trip
       // and a spurious failure record). When the input carries a python-run-tests
@@ -943,8 +949,17 @@ export async function executeToolCall(
         // implementation in the same call is the most complex part of the one tool
         // call it most often fails. When `code` is omitted or blank, default it from
         // the slot. If the agent DID pass code, respect it verbatim (do not clobber).
-        const hasUsableCode = typeof nextInput['code'] === 'string'
-          && (nextInput['code'] as string).trim().length > 0
+        // "placeholder" / "..." / "<code>" are the model saying "use what you have"
+        const isReal = (v: unknown) => typeof v === 'string' && v.trim().length > 0
+          && !/^(placeholder|\.\.\.|<[^>]*>|todo|tbd|same as above|see slot.*)$/i.test(v.trim())
+        const hasUsableCode = isReal(nextInput['code'])
+        if (!isReal(nextInput['test_code'])) {
+          const slotTests = wbGet('test_harness')
+          if (slotTests && slotTests.trim()) {
+            nextInput = { ...nextInput, test_code: slotTests }
+            console.log(`[use_skill] python-run-tests: defaulted \`test_code\` from test_harness slot (${slotTests.length}b)`)
+          }
+        }
         if (!hasUsableCode) {
           const slotImpl = wbGet('implementation')
           if (slotImpl && slotImpl.trim()) {

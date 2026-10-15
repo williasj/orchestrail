@@ -168,8 +168,12 @@ async function detectRuntimes() {
     { language: 'python', cmd: 'python3', args: ['--version'] },
     { language: 'node',   cmd: 'node',    args: ['--version'] },
     { language: 'bash',   cmd: 'bash',    args: ['--version'] },
+    { language: 'typescript', cmd: 'tsc', args: ['--version'] },
     { language: 'go',     cmd: 'go',      args: ['version'] },
     { language: 'rust',   cmd: 'rustc',   args: ['--version'] },
+    { language: 'java',   cmd: 'javac',   args: ['-version'] },
+    { language: 'c',      cmd: 'gcc',     args: ['--version'] },
+    { language: 'cpp',    cmd: 'g++',     args: ['--version'] },
     { language: 'ruby',   cmd: 'ruby',    args: ['--version'] },
   ]
   const out = []
@@ -205,10 +209,19 @@ const TOOL_DEFINITIONS = [
   { type: 'function', function: {
     name: 'bash',
     description:
-      'Run a bash command in this run\'s private working directory. State persists ' +
-      'across calls within the run: files you write stay, packages you pip/npm ' +
-      'install stay (cached). Use this to install dependencies, run code you wrote ' +
-      'with write_file, and inspect output. Returns { stdout, stderr, exit_code }.',
+      'Run a bash command in this run\'s private working directory (Ubuntu 24.04). State ' +
+      'persists across calls within the run: files you write stay, packages you ' +
+      'pip/npm install stay (cached). Returns { stdout, stderr, exit_code }. ' +
+      'Installed: python3 (venv, pip install works) with pytest, numpy, pandas, scipy, ' +
+      'matplotlib (headless, save to PNG), python-docx, python-pptx, openpyxl, pypdf, ' +
+      'pdfplumber, reportlab, pillow, requests, httpx, beautifulsoup4, lxml, pyyaml, ' +
+      'jsonschema, pydantic, ruff, mypy; node 20 with npm, typescript (tsc), tsx, eslint, ' +
+      'prettier; go, rustc/cargo, java (javac), gcc/g++/make/cmake; libreoffice ' +
+      '(soffice --headless --convert-to pdf/docx/xlsx), pandoc, pdftotext/pdftoppm, ' +
+      'qpdf, ghostscript, imagemagick (convert), ffmpeg; git, jq, sqlite3, ripgrep (rg), ' +
+      'shellcheck, zip/unzip, curl. Public internet is reachable for installs and ' +
+      'downloads; the local network is not. read_file is text-only: for binary outputs ' +
+      '(pdf, docx, png) check them with bash (file, pdftotext, python) instead.',
     parameters: { type: 'object', properties: {
       command: { type: 'string', description: 'The bash command to execute.' },
       stdin:   { type: 'string', description: 'Optional text piped to the command\'s stdin.' },

@@ -1,0 +1,51 @@
+# Python packages preinstalled in the orchestrail-exec sandbox venv.
+# Agents can still `pip install` anything else at runtime (cached in /cache/pip).
+
+# testing / quality
+pytest
+pytest-timeout
+hypothesis
+ruff
+mypy
+
+# data / analysis / plotting
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+tabulate
+
+# documents: Office, PDF, markup
+python-docx
+python-pptx
+openpyxl
+xlsxwriter
+pypdf
+pdfplumber
+reportlab
+markdown
+jinja2
+
+# images
+pillow
+
+# web / APIs / parsing
+requests
+httpx
+beautifulsoup4
+lxml
+feedparser
+
+# config / schemas / data formats
+pyyaml
+toml
+jsonschema
+pydantic
+
+# misc utilities
+python-dateutil
+pytz
+rich
+tqdm
+chardet

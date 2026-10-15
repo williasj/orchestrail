@@ -8,7 +8,7 @@
 
 import { callCoordinatorLLM } from './llm.js'
 import { extractJsonText, stripCodeBlocks } from '../utils/text.js'
-import { buildPage, wikiEnabled, wikiRequest, type WikiScope } from './wikiclient.js'
+import { buildPage, wikiEnabled, wikiReadPage, wikiRequest, type WikiScope } from './wikiclient.js'
 import type { AgentResult } from '../types/index.js'
 
 const ENABLED       = process.env.AIWIKI_LESSONS !== '0'
@@ -50,12 +50,18 @@ export function incidentsFromResults(results: AgentResult[], rewindCount: number
 
 export async function proposeLessons(scope: WikiScope, run: RunIncidents): Promise<string[]> {
   if (!ENABLED || !wikiEnabled() || !scope.user || !run.incidents.length) return []
-  const lscope: WikiScope = { ...scope, agent: 'orchestrail/lessons', conversation: run.source }
+  const lscope: WikiScope = { ...scope, agent: 'lessons', conversation: run.source }
 
   // closest existing lessons, so the model can extend one instead of duplicating it
   const q = clip(run.incidents.join(' '), 600)
   const hits = await wikiRequest<SearchHit[]>('GET', `/api/search?namespace=lessons&limit=5&q=${encodeURIComponent(q)}`, lscope)
   const existing = (hits.ok && Array.isArray(hits.data) ? hits.data : []).filter(h => h.score >= 0.45)
+  // the closest two in full, so a draft cannot quietly contradict current guidance
+  const bodies: string[] = []
+  for (const h of existing.slice(0, 2)) {
+    const pg = await wikiReadPage(lscope, h.path)
+    if (pg) bodies.push(`### ${h.path}\n${pg.body.slice(0, 1500)}`)
+  }
 
   const prompt =
     'You maintain a wiki of LESSONS for a team of AI agents (architect, engineer, test engineer, reviewer) ' +
@@ -65,10 +71,14 @@ export async function proposeLessons(scope: WikiScope, run: RunIncidents): Promi
     `## How it ended\n${clip(run.outcome, 400)}\n\n` +
     `## What went wrong\n${run.incidents.map(i => '- ' + i).join('\n')}\n\n` +
     `## Existing lessons that may already cover it\n${existing.length ? existing.map(h => `- ${h.path} -- ${h.title}: ${h.summary}`).join('\n') : '(none close)'}\n\n` +
+    (bodies.length ? `## Current text of the closest lessons\n${bodies.join('\n\n')}\n\n` : '') +
     '## Rules\n' +
     '- Only a pattern that will recur: a tool or environment pitfall, a pipeline/workbench mistake, a testing trap. ' +
     'A one-off model slip or a task-specific bug is NOT a lesson; return an empty list for those.\n' +
-    '- If an existing lesson covers it, use action "append" with that exact path and add only what is new.\n' +
+    '- If an existing lesson already says it, return an empty list. If it covers the topic but misses something, ' +
+    'use action "append" with that exact path and add only what is new.\n' +
+    '- Never contradict an existing lesson\'s guidance. If the incident shows the guidance is wrong, say so explicitly ' +
+    'in an append and explain the evidence; otherwise follow it.\n' +
     `- At most ${MAX_LESSONS} lessons. Usually zero or one.\n` +
     '- Never include user names, emails, project names, file paths from the task, secrets, or code longer than 3 lines.\n' +
     '- body is markdown with "## Symptom", "## Cause" and "## Guidance" sections (for append: one "## " section with the new observation).\n' +

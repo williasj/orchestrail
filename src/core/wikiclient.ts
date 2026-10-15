@@ -80,8 +80,10 @@ export function projectPagePath(scope: WikiScope, page: string): string | null {
 }
 
 function frontmatter(meta: Record<string, unknown>): string {
+  // JSON scalars are valid YAML; numbers and booleans stay typed, strings are quoted
+  const scalar = (x: unknown) => (typeof x === 'number' && Number.isFinite(x)) || typeof x === 'boolean' ? String(x) : JSON.stringify(String(x))
   const lines = Object.entries(meta).map(([k, v]) =>
-    `${k}: ${Array.isArray(v) ? '[' + v.map(x => JSON.stringify(String(x))).join(', ') + ']' : JSON.stringify(String(v))}`)
+    `${k}: ${Array.isArray(v) ? '[' + v.map(scalar).join(', ') + ']' : scalar(v)}`)
   return `---\n${lines.join('\n')}\n---\n\n`
 }
 

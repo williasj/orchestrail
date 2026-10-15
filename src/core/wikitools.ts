@@ -78,6 +78,9 @@ function scopeFor(agentName?: string): WikiScope | null {
 }
 
 const err = (msg: string) => JSON.stringify({ error: msg })
+// status 0 = no HTTP response (timeout / network): the write may still have landed
+const writeErr = (r: { status: number; error?: string }, fallback: string) =>
+  (r.error || fallback) + (r.status === 0 ? ' -- the wiki may still have saved it; wiki_read the page before retrying' : '')
 const enc = (p: string) => p.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')
 
 export async function executeWikiTool(name: string, args: Record<string, unknown>, agentName?: string): Promise<string> {
@@ -123,7 +126,7 @@ export async function executeWikiTool(name: string, args: Record<string, unknown
     if (!path) return err('page is required (e.g. index, decisions, notes)')
     if (!s('title') || !s('summary') || !s('body')) return err('title, summary and body are required')
     const r = await wikiPutPage(scope, path, buildPage(s('title'), s('summary'), s('body')), `Update ${s('page')}`)
-    if (!r.ok) return err(r.error || 'write failed')
+    if (!r.ok) return err(writeErr(r, 'write failed'))
     return JSON.stringify({ ok: true, path: path + '.md' })
   }
 
@@ -131,7 +134,7 @@ export async function executeWikiTool(name: string, args: Record<string, unknown
     if (!scope.project) return err('this conversation is not bound to a project; there is no project log to append to.')
     if (!s('entry')) return err('entry is required')
     const r = await wikiAppendLog(scope, s('heading') || 'update', s('entry'))
-    if (!r || !r.ok) return err(r?.error || 'append failed')
+    if (!r || !r.ok) return err(r ? writeErr(r, 'append failed') : 'append failed')
     return JSON.stringify({ ok: true })
   }
 

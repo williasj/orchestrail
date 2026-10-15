@@ -14,7 +14,7 @@
 
 export const AIWIKI_URL   = (process.env.AIWIKI_URL || '').replace(/\/+$/, '')
 const AIWIKI_TOKEN        = process.env.AIWIKI_TOKEN || ''
-const TIMEOUT_MS          = Number(process.env.AIWIKI_TIMEOUT_MS || 10_000)
+const TIMEOUT_MS          = Number(process.env.AIWIKI_TIMEOUT_MS || 30_000)
 export const STUB_MIN_SCORE = Number(process.env.AIWIKI_STUB_MIN_SCORE || 0.55)
 
 export interface WikiScope {

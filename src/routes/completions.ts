@@ -122,7 +122,7 @@ export interface CompletionsDeps {
   usageStorage:     AsyncLocalStorage<UsageTotals>
 
   /** Bumps the global generation counter; returns current value after bump. */
-  bumpGeneration:   () => number
+  bumpGeneration:   (scope?: string) => number
   getGeneration:    () => number
 
   /** Fast LLM call for ghost/metadata requests. */
@@ -316,7 +316,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     appendMessage(userId, conversationId, 'user', goal)
 
     const phase      = detectPhase(messages as ChatMessage[])
-    const generation = bumpGeneration()
+    const generation = bumpGeneration(`${userId}:${conversationId}`)
 
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream')
@@ -569,7 +569,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
     const wikiScope: WikiScope = { user: userId, project: projectId ?? null, agent: 'coordinator', conversation: conversationId }
 
     const phase      = detectPhase(messages as ChatMessage[])
-    const generation = bumpGeneration()
+    const generation = bumpGeneration(`${userId}:${conversationId}`)
     const runId      = uuidv4()
 
     // SSE helpers

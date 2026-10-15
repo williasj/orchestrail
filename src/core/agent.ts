@@ -2,6 +2,7 @@
 // runAgent: main agentic loop -- tool calls, retries, pipeline completion.
 // currentGeneration: monotonic counter used to abort stale requests.
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   HANDOFF_DONE, HANDOFF_FOOTER, MAX_TOOL_ROUNDS,
 } from '../utils/config.js'
@@ -50,9 +51,29 @@ export function slotOwner(slot: string): string | null {
 // Each new /v1/chat/completions request bumps this. runAgent checks it each
 // round and aborts if stale so superseded agents don't keep running.
 
-let currentGeneration = 0
-export function bumpGeneration(): number { return ++currentGeneration }
-export function getGeneration():  number { return currentGeneration }
+// Scoped per conversation (user + conversation id), not global: a single global
+// counter meant any new request -- or any run finishing -- aborted every other
+// user's in-flight run. The scope rides an AsyncLocalStorage entered by the
+// request handler, so agents, pipelines and DAGs spawned from that request see
+// their own conversation's generation. Regenerate/stop in the same conversation
+// still supersedes the earlier request, as intended.
+const generationScope = new AsyncLocalStorage<string>()
+const activeGeneration = new Map<string, number>()
+let generationCounter = 0
+export function bumpGeneration(scope?: string): number {
+  if (scope) generationScope.enterWith(scope)
+  const key = generationScope.getStore() ?? 'global'
+  const n = ++generationCounter
+  activeGeneration.set(key, n)
+  if (activeGeneration.size > 5000) {            // keep the map bounded
+    const oldest = activeGeneration.keys().next().value
+    if (oldest !== undefined && oldest !== key) activeGeneration.delete(oldest)
+  }
+  return n
+}
+export function getGeneration(): number {
+  return activeGeneration.get(generationScope.getStore() ?? 'global') ?? 0
+}
 
 // -- runAgent ------------------------------------------------------------------
 
@@ -566,7 +587,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
     }
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      if (generation !== currentGeneration) {
+      if (generation !== getGeneration()) {
         console.log(`[abort] ${spec.assignee}:${spec.title} superseded`)
         return { assignee: spec.assignee, title: spec.title, output: '(aborted)', success: false }
       }

@@ -180,7 +180,8 @@ export function createCoordinatorRoute(deps: CoordinatorRouteDeps): CoordinatorR
     // by the override guard to tell a real missing artifact from a hallucinated one.
     const knownArtifacts = [...new Set(agents.flatMap(a => a.requiredOutputSlots ?? []))]
 
-    const raw = await callLLM([
+    let raw = ''
+    try { raw = await callLLM([
       { role: 'system', content: buildRoutingSystem(goal, remainingStages, completedStages, agents, getRoutingPrompt()) },
       { role: 'user',   content:
           `## Prior stages\n${historyStr}\n\n` +
@@ -190,7 +191,10 @@ export function createCoordinatorRoute(deps: CoordinatorRouteDeps): CoordinatorR
           `Stage output (first 2000 chars):\n${stageOutput.slice(0, 2000)}${stageOutput.length > 2000 ? '\n...' : ''}\n\n` +
           `What is your routing decision?`
       },
-    ], 256)
+    ], 256) } catch (e) {
+      // A routing failure must not abort the run: the stage signalled DONE, so advance.
+      console.warn(`[coordinator] routing call failed after ${currentStage.name}: ${String(e).slice(0, 160)} -- defaulting to NEXT`)
+    }
     const durationMs = Date.now() - t0
 
     const cleaned   = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim()

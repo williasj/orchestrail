@@ -109,6 +109,14 @@ export async function callCoordinatorLLM(
     : messages
   const think = opts.think ?? maxTokens >= 2048
   const local = coordinator.llm.provider !== 'anthropic' && coordinator.llm.provider !== 'openai'
-  const extra = !think && local ? { reasoning_effort: 'none' } : undefined
-  return callLLM(flagged, coordinator.llm, maxTokens, think ? 0.6 : 0, 'orchestrail/coordinator', extra)
+  if (think || !local) return callLLM(flagged, coordinator.llm, maxTokens, think ? 0.6 : 0, 'orchestrail/coordinator')
+  try {
+    return await callLLM(flagged, coordinator.llm, maxTokens, 0, 'orchestrail/coordinator', { reasoning_effort: 'none' })
+  } catch (e) {
+    // Without thinking the tool-trained model occasionally opens its reply with a
+    // malformed tool-call tag; Ollama's parser then fails the request (500 EOF).
+    // Retry once with thinking on and room for it.
+    console.warn(`[llm] coordinator call without thinking failed (${String(e).slice(0, 120)}) -- retrying with thinking`)
+    return callLLM(flagged, coordinator.llm, Math.max(maxTokens, 4096), 0.6, 'orchestrail/coordinator')
+  }
 }

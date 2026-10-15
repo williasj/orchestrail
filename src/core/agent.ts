@@ -549,7 +549,17 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
         return { assignee: spec.assignee, title: spec.title, output: '(aborted)', success: false }
       }
 
-      const response = await callLLMRaw(messages, llm, maxTokens, temperature, toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`)
+      let response: Awaited<ReturnType<typeof callLLMRaw>>
+      try {
+        response = await callLLMRaw(messages, llm, maxTokens, temperature, toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`)
+      } catch (e) {
+        // A server-side 5xx is usually Ollama failing to parse a malformed tool call
+        // the model emitted ("tool call parsing failed: EOF"). One retry samples a
+        // different completion; a second failure propagates as before.
+        if (!/LLM error: 5\d\d/.test(String(e))) throw e
+        console.warn(`[agent] ${spec.assignee}: LLM ${String(e).slice(0, 120)} -- retrying once`)
+        response = await callLLMRaw(messages, llm, maxTokens, Math.max(temperature, 0.6), toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`)
+      }
       const choice   = response.choices[0]
       if (!choice) break
 

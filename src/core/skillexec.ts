@@ -647,7 +647,7 @@ export async function createSkill(
 // A human-authored folder already contains SKILL.md + entrypoint. Import = run
 // self-test, (re)embed, upsert. Skip-stable via content_hash.
 
-export async function importSkillFolder(folder: string, exec: CodeExecFn): Promise<'imported' | 'updated' | 'skipped' | 'error'> {
+export async function importSkillFolder(folder: string, exec: CodeExecFn, force = false): Promise<'imported' | 'updated' | 'skipped' | 'error'> {
   if (!skillExecEnabled()) return 'error'
   const read = await readManifest(folder)
   if (!read) { console.warn(`[skillcap] invalid manifest in ${folder}`); return 'error' }
@@ -659,9 +659,10 @@ export async function importSkillFolder(folder: string, exec: CodeExecFn): Promi
 
   const readHash = stableManifestHash(m, body, source)
 
-  // Skip if already indexed unchanged.
+  // Skip if already indexed unchanged (admin edits / restores pass force so
+  // the self-test always runs and the index payload is rewritten).
   const mem = getMemoryCfg()!
-  try {
+  if (!force) try {
     const res = await fetch(`${mem.qdrantUrl}/collections/${cols.skillCaps}/points/scroll`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ limit: 1, with_payload: true,
@@ -683,6 +684,12 @@ export async function importSkillFolder(folder: string, exec: CodeExecFn): Promi
     if (m.status === 'provisional') { m.status = 'stable'; m.confidence = Math.max(m.confidence, 0.9) }
   } else if (st.ran) {
     m.self_test_passed = false
+    // A skill whose declared examples no longer pass must not keep advertising
+    // itself as stable; it drops back to provisional until fixed.
+    if (m.status === 'stable') {
+      m.status = 'provisional'
+      console.warn(`[skillcap] self-test failed for ${m.name} (${st.passed}/${st.total}), demoted to provisional: ${st.failures.slice(0, 2).join('; ')}`)
+    }
   }
   m.last_updated = now
   if (!m.created_at) m.created_at = now
@@ -965,7 +972,7 @@ export async function editSkillFiles(
     // Deprecated skills are not indexed; just report the new state.
     return { status: 'skipped', detail: await getSkillDetail(name) }
   }
-  const status = await importSkillFolder(loc.folder, exec)
+  const status = await importSkillFolder(loc.folder, exec, true)
   console.log(`[skillcap] admin edit: ${name} -> ${status}`)
   return { status, detail: await getSkillDetail(name) }
 }
@@ -995,7 +1002,7 @@ export async function restoreSkill(name: string, exec: CodeExecFn): Promise<{ st
   await writeManifest(loc.folder, read.manifest, read.body)
   await fsp.mkdir(path.dirname(dest), { recursive: true })
   await fsp.rename(loc.folder, dest)
-  const status = await importSkillFolder(dest, exec)
+  const status = await importSkillFolder(dest, exec, true)
   console.log(`[skillcap] admin restored: ${name} -> ${status}`)
   return { status }
 }

@@ -3,6 +3,7 @@
 // alias used by OpenWebUI's External connection mode).
 
 import { wikiAppendLog, wikiContextFor, wikiSlug, type WikiScope } from '../core/wikiclient.js'
+import { stripCodeBlocks } from '../utils/text.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { v4 as uuidv4 }     from 'uuid'
 import type { Request, Response, Router } from 'express'
@@ -698,8 +699,10 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
         // Deterministic project write-back: every run in a bound conversation is logged
         if (projectId) {
           const agentsUsed = [...new Set(completedResults.map(r => r.assignee))].join(', ')
+          // code lives in the conversation and workbench; the log keeps the prose outcome
+          const outcome = stripCodeBlocks(finalText).replace(/\n{3,}/g, '\n\n').trim()
           wikiAppendLog(wikiScope, goal.slice(0, 100),
-            `**Goal:** ${goal.slice(0, 600)}\n\n**Outcome:** ${finalText.slice(0, 900).trim()}${finalText.length > 900 ? ' ...' : ''}\n\n` +
+            `**Goal:** ${goal.slice(0, 600)}\n\n**Outcome:** ${outcome.slice(0, 1200)}${outcome.length > 1200 ? ' ...' : ''}\n\n` +
             `**Agents:** ${agentsUsed}  \n**Conversation:** ${conversationId}`,
           ).catch(() => {})
         }

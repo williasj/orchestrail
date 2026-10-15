@@ -862,3 +862,144 @@ export async function watchSkillCaps(exec: CodeExecFn): Promise<void> {
     console.warn(`[skillcap] watcher failed to start: ${e}`)
   }
 }
+
+// -- Admin surface (routes/skills.ts) ------------------------------------------
+// Read / edit / deprecate / restore skills from the admin API. Edits go through
+// the same importSkillFolder path the watcher uses (self-test -> embed ->
+// upsert), so an API edit and a hand-edited folder end up in the same state.
+
+export type SkillLocation = 'agent' | 'user' | 'deprecated'
+
+export interface SkillDetail {
+  name:      string
+  location:  SkillLocation
+  manifest:  SkillManifest
+  skillMd:   string                                   // full SKILL.md text
+  body:      string                                   // markdown below the frontmatter
+  source:    string | null                            // entrypoint file contents
+  examples:  Array<{ input: unknown; expect: unknown }>
+  files:     string[]
+}
+
+export interface SkillFileEdit {
+  skillMd?:  string                                   // full SKILL.md (frontmatter + body)
+  source?:   string                                   // entrypoint contents
+  examples?: Array<{ input: unknown; expect: unknown }>
+}
+
+export async function locateSkill(name: string): Promise<{ folder: string; location: SkillLocation } | null> {
+  if (!skillExecEnabled()) return null
+  for (const sub of ['user', 'agent', 'deprecated'] as const) {
+    const folder = path.join(capSubdir(sub), name)
+    try { await fsp.access(manifestPath(folder)); return { folder, location: sub } } catch { /* next */ }
+  }
+  return null
+}
+
+export async function getSkillDetail(name: string): Promise<SkillDetail | null> {
+  const loc = await locateSkill(name)
+  if (!loc) return null
+  const read = await readManifest(loc.folder)
+  if (!read) return null
+  let skillMd = ''
+  try { skillMd = await fsp.readFile(manifestPath(loc.folder), 'utf-8') } catch { /* empty */ }
+  let source: string | null = null
+  try { source = await fsp.readFile(path.join(loc.folder, read.manifest.entrypoint), 'utf-8') } catch { /* missing */ }
+  let files: string[] = []
+  try { files = (await fsp.readdir(loc.folder)).sort() } catch { /* empty */ }
+  return {
+    name, location: loc.location, manifest: read.manifest, skillMd, body: read.body,
+    source, examples: await readExamples(loc.folder), files,
+  }
+}
+
+/** Overwrite any of SKILL.md / entrypoint / examples.json, then re-import.
+ *  Rolls the files back if the new SKILL.md does not parse or renames the skill. */
+export async function editSkillFiles(
+  name: string, edit: SkillFileEdit, exec: CodeExecFn,
+): Promise<{ status: 'imported' | 'updated' | 'skipped' | 'error'; error?: string; detail?: SkillDetail | null }> {
+  const loc = await locateSkill(name)
+  if (!loc) return { status: 'error', error: `No skill named "${name}"` }
+  const cur = await readManifest(loc.folder)
+  if (!cur) return { status: 'error', error: `Skill "${name}" has an invalid SKILL.md` }
+
+  const backups: Array<[string, string | null]> = []
+  const snap = async (file: string) => {
+    let prev: string | null = null
+    try { prev = await fsp.readFile(file, 'utf-8') } catch { /* new file */ }
+    backups.push([file, prev])
+  }
+  const rollback = async () => {
+    for (const [file, prev] of backups) {
+      try { if (prev === null) await fsp.rm(file, { force: true }); else await fsp.writeFile(file, prev, 'utf-8') }
+      catch { /* best effort */ }
+    }
+  }
+
+  try {
+    if (edit.skillMd !== undefined) {
+      await snap(manifestPath(loc.folder))
+      await fsp.writeFile(manifestPath(loc.folder), edit.skillMd, 'utf-8')
+      const next = await readManifest(loc.folder)
+      if (!next) { await rollback(); return { status: 'error', error: 'SKILL.md does not parse (frontmatter needs at least name and entrypoint)' } }
+      if (next.manifest.name !== name) { await rollback(); return { status: 'error', error: `SKILL.md name "${next.manifest.name}" must match "${name}" (rename by creating a new skill)` } }
+    }
+    const manifest = (await readManifest(loc.folder))!.manifest
+    if (edit.source !== undefined) {
+      const file = path.join(loc.folder, manifest.entrypoint)
+      await snap(file)
+      await fsp.writeFile(file, edit.source, 'utf-8')
+    }
+    if (edit.examples !== undefined) {
+      if (!Array.isArray(edit.examples)) { await rollback(); return { status: 'error', error: 'examples must be an array of {input, expect}' } }
+      const file = path.join(loc.folder, 'examples.json')
+      await snap(file)
+      await fsp.writeFile(file, JSON.stringify(edit.examples, null, 2) + '\n', 'utf-8')
+    }
+  } catch (e) {
+    await rollback()
+    return { status: 'error', error: `write failed: ${e instanceof Error ? e.message : String(e)}` }
+  }
+
+  if (loc.location === 'deprecated') {
+    // Deprecated skills are not indexed; just report the new state.
+    return { status: 'skipped', detail: await getSkillDetail(name) }
+  }
+  const status = await importSkillFolder(loc.folder, exec)
+  console.log(`[skillcap] admin edit: ${name} -> ${status}`)
+  return { status, detail: await getSkillDetail(name) }
+}
+
+export async function deprecateSkill(name: string): Promise<{ ok: boolean; error?: string }> {
+  const loc = await locateSkill(name)
+  if (!loc) return { ok: false, error: `No skill named "${name}"` }
+  if (loc.location === 'deprecated') return { ok: true }
+  const read = await readManifest(loc.folder)
+  if (read) { read.manifest.status = 'deprecated'; read.manifest.last_updated = new Date().toISOString(); await writeManifest(loc.folder, read.manifest, read.body) }
+  await deprecateFolder(loc.folder, name)
+  await capSetPayload(name, { status: 'deprecated' })
+  console.log(`[skillcap] admin deprecated: ${name}`)
+  return { ok: true }
+}
+
+export async function restoreSkill(name: string, exec: CodeExecFn): Promise<{ status: string; error?: string }> {
+  const loc = await locateSkill(name)
+  if (!loc) return { status: 'error', error: `No skill named "${name}"` }
+  if (loc.location !== 'deprecated') return { status: 'skipped' }
+  const read = await readManifest(loc.folder)
+  if (!read) return { status: 'error', error: 'invalid SKILL.md' }
+  const dest = path.join(capSubdir(read.manifest.author_type === 'agent' ? 'agent' : 'user'), name)
+  read.manifest.status = 'provisional'
+  read.manifest.content_hash = ''
+  read.manifest.last_updated = new Date().toISOString()
+  await writeManifest(loc.folder, read.manifest, read.body)
+  await fsp.mkdir(path.dirname(dest), { recursive: true })
+  await fsp.rename(loc.folder, dest)
+  const status = await importSkillFolder(dest, exec)
+  console.log(`[skillcap] admin restored: ${name} -> ${status}`)
+  return { status }
+}
+
+export async function rescanSkills(exec: CodeExecFn): Promise<void> {
+  await startupScanCaps(exec)
+}

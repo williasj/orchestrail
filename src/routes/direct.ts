@@ -128,7 +128,8 @@ export function registerDirectRoutes(router: Router, deps: DirectDeps): void {
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     let closed = false
-    req.on('close', () => { closed = true })
+    // res 'close' = client went away. (req 'close' fires once the request body is read.)
+    res.on('close', () => { closed = true })
     const send = (ev: Record<string, unknown>) => { if (!closed) res.write(`data: ${JSON.stringify(ev)}\n\n`) }
     send({ type: 'init', conversationId: convId, model: llm.model, tools: toolIds, project: projectId ?? null })
 

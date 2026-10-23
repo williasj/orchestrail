@@ -4,6 +4,11 @@
 
 import { wikiAppendLog, wikiContextFor, wikiSlug, type WikiScope } from '../core/wikiclient.js'
 import { stripCodeBlocks } from '../utils/text.js'
+import {
+  renderClarificationQuestions, foldClarificationAnswers,
+  detectConsequentialAmbiguity, buildClarificationQuestions,
+  type ClarificationQuestion,
+} from '../utils/intake.js'
 import { incidentsFromResults, proposeLessons } from '../core/wikilearn.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { v4 as uuidv4 }     from 'uuid'
@@ -20,6 +25,8 @@ import { wbIdToConversationId } from '../core/workbench.js'
 import { toolLogContextStorage, getToolLog } from '../core/tools.js'
 import { touchConversation, appendMessage, getMessages, getConversationProject, setConversationProject } from '../core/conversation.js'
 import { MODEL_ID }             from '../utils/config.js'
+import { costSuffix, formatDuration, renderRunCostLine } from '../utils/cost.js'
+import { cheapModeStage, CHEAP_MODE_AGENT, CHEAP_MODE_REASONING_EFFORT } from '../utils/cheapmode.js'
 
 // Marker injected into clarification replies so follow-up turns are routed
 // back through the execute-with-context phase.
@@ -37,11 +44,14 @@ type Phase = 'clarify' | 'execute' | 'execute-with-context'
 function buildAgentsFooter(results: AgentResult[], grandTotal = 0): string {
   const order: string[] = []
   const byAgent = new Map<string, number>()
+  const byAgentMs = new Map<string, number>()
   for (const r of results) {
     if (!byAgent.has(r.assignee)) order.push(r.assignee)
     byAgent.set(r.assignee, (byAgent.get(r.assignee) ?? 0) + (r.tokens ?? 0))
+    byAgentMs.set(r.assignee, (byAgentMs.get(r.assignee) ?? 0) + (r.durationMs ?? 0))
   }
   const agentSum = [...byAgent.values()].reduce((a, b) => a + b, 0)
+  const totalMs  = [...byAgentMs.values()].reduce((a, b) => a + b, 0)
   // Coordinator usage = everything in the per-request accumulator that was NOT an
   // agent stage: clarify, decompose, every route, and synthesize. Derived from the
   // grand total so we don't thread a separate counter through the coordinator calls.
@@ -51,10 +61,15 @@ function buildAgentsFooter(results: AgentResult[], grandTotal = 0): string {
   const parts: string[] = []
   if (coordinator > 0) parts.push(`coordinator (${fmt(coordinator)} tokens)`)
   for (const a of order) {
-    const t = byAgent.get(a) ?? 0
-    parts.push(t > 0 ? `${a} (${fmt(t)} tokens)` : a)
+    const t  = byAgent.get(a) ?? 0
+    const ms = byAgentMs.get(a) ?? 0
+    // Per-stage cost (item 17 / B3): tokens + wall-time, either dimension. When
+    // durationMs is absent (e.g. a pre-change run) this renders exactly as before.
+    const inner = [t > 0 ? `${fmt(t)} tokens` : '', ms > 0 ? formatDuration(ms) : ''].filter(Boolean).join(' · ')
+    parts.push(inner ? `${a} (${inner})` : a)
   }
-  const totalSuffix = total > 0 ? ` -- total ${fmt(total)} tokens` : ''
+  const totalLine = renderRunCostLine(total, totalMs)
+  const totalSuffix = totalLine ? ` -- ${totalLine}` : ''
   return `\n\n---\n*Agents: ${parts.join(', ')}${totalSuffix}*`
 }
 
@@ -81,7 +96,16 @@ function buildEnrichedGoal(messages: ChatMessage[]): string {
   const answers      = allNonSystem.slice(clarifyIdx + 1).filter(m => m.role === 'user').at(-1)?.content ?? ''
   const originalGoal = allNonSystem.slice(0, clarifyIdx).filter(m => m.role === 'user').at(-1)?.content ?? ''
 
-  return `${originalGoal}\n\n## Clarification Q&A\n${questions}\n\nAnswers: ${answers}`
+  // Fold the user's picks back into the goal deterministically (Issue 10). The
+  // structured questions are re-derived from the original goal (the same goal the
+  // gate asked about), so the fold matches the canonical option ids/labels. The
+  // raw Q&A is always preserved below, so a best-effort fold never loses info.
+  const det    = detectConsequentialAmbiguity(originalGoal)
+  const folded = det.isConsequential
+    ? foldClarificationAnswers(originalGoal, buildClarificationQuestions(det.dimensions), answers)
+    : originalGoal
+
+  return `${folded}\n\n## Clarification Q&A\n${questions}\n\nAnswers: ${answers}`
 }
 
 function buildExecuteGoal(messages: ChatMessage[]): string {
@@ -140,13 +164,13 @@ export interface CompletionsDeps {
   runClarificationIntake: (goal: string) => Promise<
     | { decision: 'PROCEED' }
     | { decision: 'DIRECT';   answer: string }
-    | { decision: 'CLARIFY';  questions: string }
+    | { decision: 'CLARIFY';  questions: ClarificationQuestion[] }
   >
 
   decomposeGoal:   (goal: string) => Promise<DecomposeResult>
   synthesize:      (goal: string, results: AgentResult[], wbSnapshot?: Record<string, string>) => Promise<string>
 
-  runAgent:          (spec: TaskSpec,    generation: number) => Promise<AgentResult>
+  runAgent:          (spec: TaskSpec,    generation: number, reasoningEffort?: string) => Promise<AgentResult>
   coordinatorRoute:  CoordinatorRouteFn
   rehydrateWorkbench: RehydrateFn
 
@@ -352,7 +376,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
             }
             if (intake.decision === 'CLARIFY') {
               sendChunk(`> **[coordinator]** a few questions before the team starts:\n\n`)
-              sendChunk(`${intake.questions}\n${CLARIFY_MARKER}`)
+              sendChunk(`${renderClarificationQuestions(intake.questions)}\n${CLARIFY_MARKER}`)
               sendDone(); return
             }
             sendChunk('> **[coordinator]** goal is clear, decomposing...\n')
@@ -364,23 +388,31 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
               ? buildExecuteGoal(messages as ChatMessage[])
               : baseGoal
 
-          sendChunk('> **[coordinator]** decomposing goal...\n')
           const runStartTs = Date.now()
-          const decomposed = await decomposeGoal(fullGoal)
+          const cheapMode = body['cheap_mode'] === true || body['cheapMode'] === true
+          const activeRunAgent = cheapMode
+            ? (spec: TaskSpec, generation: number) => runAgent(spec, generation, CHEAP_MODE_REASONING_EFFORT)
+            : runAgent
+          const decomposed: DecomposeResult = cheapMode
+            ? { mode: 'pipeline', stages: [cheapModeStage(fullGoal)] }
+            : await decomposeGoal(fullGoal)
+          if (cheapMode) sendChunk(`> **[coordinator]** cheap mode — single agent (${CHEAP_MODE_AGENT}), lower reasoning, no verification gates\n\n`)
+          else sendChunk('> **[coordinator]** decomposing goal...\n')
 
           let completedResults: AgentResult[]
           let pipelineWbSnapshot: Record<string, string> = {}
           let pipelineRewindCount = 0
 
           if (decomposed.mode === 'pipeline') {
-            sendChunk(`> **[coordinator]** pipeline — ${decomposed.stages.length} stages\n\n`)
+            sendChunk(`> **[coordinator]** pipeline — ${decomposed.stages.length} stage${decomposed.stages.length !== 1 ? 's' : ''}\n\n`)
             const pr = await executePipeline(decomposed.stages, fullGoal, generation, {
               onStageStart: (stage, attempt) => {
                 sendChunk(`> **[${stage.assignee}]** ${stage.name}${attempt > 0 ? ` (retry ${attempt})` : ''}...\n`)
               },
               onStageDone: (stage, result, status) => {
                 const icon = status === 'escalate' ? '⚠' : '✓'
-                sendChunk(`> **[done]** ${stage.assignee}: ${stage.name} ${icon}\n`)
+                const cost = costSuffix(result)
+                sendChunk(`> **[done]** ${stage.assignee}: ${stage.name} ${icon}${cost}\n`)
                 sendChunk(`\n<details>\n<summary>${stage.assignee} — ${stage.name}${status === 'escalate' ? ' ⚠' : ''}</summary>\n\n${result.output}\n\n</details>\n`)
               },
               onFixStart:  (_stage, fixAgent, reason) => { sendChunk(`> **[${fixAgent}]** fixing ${_stage.name}: ${reason.slice(0, 80)}...\n`) },
@@ -391,7 +423,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
                 else if (decision.action === 'SYNTHESIZE') sendChunk(`> **[coordinator]** work complete — synthesizing early\n`)
               },
               onRewind: (_from, toStage, reason) => { sendChunk(`> **[coordinator]** rewinding to ${toStage}: ${reason}\n`) },
-            }, { runAgent, coordinatorRoute, rehydrateWorkbench, getGeneration }, conversationId)
+            }, { runAgent: activeRunAgent, coordinatorRoute, rehydrateWorkbench, getGeneration }, conversationId)
             completedResults    = pr.results
             pipelineWbSnapshot  = pr.wbSnapshot
             pipelineRewindCount = pr.rewindCount
@@ -456,7 +488,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
               return
             }
             if (intake.decision === 'CLARIFY') {
-              const content = `Before the team starts, a few questions:\n\n${intake.questions}\n${CLARIFY_MARKER}`
+              const content = `Before the team starts, a few questions:\n\n${renderClarificationQuestions(intake.questions)}\n${CLARIFY_MARKER}`
               res.json({ id: completionId, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: MODEL_ID, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: usageStorage.getStore() ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
               return
             }
@@ -469,7 +501,13 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
               : baseGoal
 
           const runStartTs = Date.now()
-          const decomposed = await decomposeGoal(fullGoal)
+          const cheapMode = body['cheap_mode'] === true || body['cheapMode'] === true
+          const activeRunAgent = cheapMode
+            ? (spec: TaskSpec, generation: number) => runAgent(spec, generation, CHEAP_MODE_REASONING_EFFORT)
+            : runAgent
+          const decomposed: DecomposeResult = cheapMode
+            ? { mode: 'pipeline', stages: [cheapModeStage(fullGoal)] }
+            : await decomposeGoal(fullGoal)
           let results: AgentResult[]
           let nsWbSnapshot:    Record<string, string> = {}
           let nsRewindCount  = 0
@@ -483,7 +521,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
               onMaxRetries:       (stage) => { console.log(`[max retries] ${stage.name}`) },
               onCoordinatorRoute: (decision) => { console.log(`[coordinator] ${decision.action}${decision.targetAgent ? ' → ' + decision.targetAgent : ''}${decision.rewindTo ? ' → ' + decision.rewindTo : ''}: ${decision.reason}`) },
               onRewind:           (fromStage, toStage, reason) => { console.log(`[rewind] ${fromStage} → ${toStage}: ${reason}`) },
-            }, { runAgent, coordinatorRoute, rehydrateWorkbench, getGeneration }, conversationId)
+            }, { runAgent: activeRunAgent, coordinatorRoute, rehydrateWorkbench, getGeneration }, conversationId)
             results        = pr.results
             nsWbSnapshot   = pr.wbSnapshot
             nsRewindCount  = pr.rewindCount
@@ -609,7 +647,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
             sendDone(); return
           }
           if (intake.decision === 'CLARIFY') {
-            const clarifyContent = `> **[coordinator]** a few questions before the team starts:\n\n${intake.questions}\n${CLARIFY_MARKER}`
+            const clarifyContent = `> **[coordinator]** a few questions before the team starts:\n\n${renderClarificationQuestions(intake.questions)}\n${CLARIFY_MARKER}`
             sendChunk(clarifyContent)
             appendMessage(userId, conversationId, 'assistant', clarifyContent)
             sendDone(); return
@@ -628,9 +666,16 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
         if (wikiCtx) sendChunk(`> **[coordinator]** AIWiki context loaded${projectId ? ` (project ${projectId})` : ''}\n`)
         const teamGoal = wikiCtx ? `${fullGoal}\n\n${wikiCtx}` : fullGoal
 
-        sendChunk('> **[coordinator]** decomposing goal...\n')
         const runStartTs = Date.now()
-        const decomposed = await decomposeGoal(teamGoal)
+        const cheapMode = req.body['cheap_mode'] === true || req.body['cheapMode'] === true
+        const activeRunAgent = cheapMode
+          ? (spec: TaskSpec, generation: number) => runAgent(spec, generation, CHEAP_MODE_REASONING_EFFORT)
+          : runAgent
+        const decomposed: DecomposeResult = cheapMode
+          ? { mode: 'pipeline', stages: [cheapModeStage(teamGoal)] }
+          : await decomposeGoal(teamGoal)
+        if (cheapMode) sendChunk(`> **[coordinator]** cheap mode — single agent (${CHEAP_MODE_AGENT}), lower reasoning, no verification gates\n\n`)
+        else sendChunk('> **[coordinator]** decomposing goal...\n')
 
         let completedResults: AgentResult[]
         let wbSnapshot: Record<string, string> = {}
@@ -644,7 +689,8 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
             },
             onStageDone: (stage, result, status) => {
               const icon = status === 'escalate' ? '⚠' : '✓'
-              sendChunk(`> **[done]** ${stage.assignee}: ${stage.name} ${icon}\n`)
+              const cost = costSuffix(result)
+              sendChunk(`> **[done]** ${stage.assignee}: ${stage.name} ${icon}${cost}\n`)
               sendChunk(`\n<details>\n<summary>${stage.assignee} — ${stage.name}${status === 'escalate' ? ' ⚠' : ''}</summary>\n\n${result.output}\n\n</details>\n`)
             },
             onFixStart:  (_stage, fixAgent, reason) => { sendChunk(`> **[${fixAgent}]** fixing ${_stage.name}: ${reason.slice(0, 80)}...\n`) },
@@ -655,7 +701,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
               else if (decision.action === 'SYNTHESIZE') sendChunk(`> **[coordinator]** work complete — synthesizing early\n`)
             },
             onRewind: (_from, toStage, reason) => { sendChunk(`> **[coordinator]** rewinding to ${toStage}: ${reason}\n`) },
-          }, { runAgent, coordinatorRoute, rehydrateWorkbench, getGeneration }, conversationId)
+          }, { runAgent: activeRunAgent, coordinatorRoute, rehydrateWorkbench, getGeneration }, conversationId)
           completedResults = pr.results
           wbSnapshot       = pr.wbSnapshot
           rewindCount      = pr.rewindCount

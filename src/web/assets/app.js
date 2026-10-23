@@ -1886,6 +1886,34 @@ var chatConvList     = [];     // ConversationMeta[] for sidebar
 var chatProject  = null;
 var chatProjects = [];
 
+// -- AIWiki scoping rule (E2) ---------------------------------------------------
+// The AIWiki visibility rule, made explicit in the UI so users understand the
+// scoping: bound to project P -> agents read AND write only P's memory; unbound
+// -> agents read all of the user's projects but write to none; and no agent ever
+// sees another user's pages. Pure leaf (no DOM / I/O) so it is unit-testable in
+// the sandbox (wikiscoping.check.mjs).
+function wikiScopeRule(project) {
+  var bound = !!project;
+  return {
+    bound: bound,
+    badge: bound ? ('Bound: ' + project) : 'Unbound',
+    rule: bound
+      ? 'Agents read and write only "' + project + '"\'s memory. Other projects are hidden from them.'
+      : 'No project is bound. Agents can read all of your projects but write to none.',
+    invariant: 'Agents never see another user\'s pages.',
+  };
+}
+
+// Renders the scoping rule as an HTML line (badge + rule + invariant). Pure --
+// returns a string; the caller inserts it into the DOM.
+function renderWikiScopeLine(project) {
+  var r = wikiScopeRule(project);
+  var badgeClass = 'wiki-scope-badge ' + (r.bound ? 'wiki-scope-bound' : 'wiki-scope-unbound');
+  return '<span class="' + badgeClass + '">' + esc(r.badge) + '</span>' +
+    '<span class="wiki-scope-rule">' + esc(r.rule) + '</span>' +
+    '<span class="wiki-scope-inv">' + esc(r.invariant) + '</span>';
+}
+
 function chatLoadProjects() {
   return apiFetch('/api/wiki/status').then(function(r){ return r.json(); }).then(function(st) {
     var bar = document.getElementById('chat-project-bar');
@@ -1907,10 +1935,8 @@ function renderChatProjectSelect() {
     names.map(function(n){ return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') +
     '<option value="__new__">+ New project...</option>';
   sel.value = chatProject || '';
-  var hint = document.getElementById('chat-project-hint');
-  if (hint) hint.textContent = chatProject
-    ? 'Agents read and update this project\'s memory; other projects are hidden.'
-    : 'Agents can see all your projects but write to none.';
+  var scope = document.getElementById('chat-project-scope');
+  if (scope) scope.innerHTML = renderWikiScopeLine(chatProject);
 }
 
 function chatProjectChanged() {
@@ -2037,7 +2063,9 @@ function renderChatContent(raw, isUser) {
     var se = inner.indexOf('</summary>');
     var summary = (ss !== -1 && se !== -1) ? inner.slice(ss + 9, se) : 'Details';
     var body = (se !== -1) ? inner.slice(se + 10).trim() : inner;
-    out += '__DET__' + esc(summary) + '__SEP__' + esc(body) + '__END__';
+    var sumFlat = esc(summary).replace(/\r?\n/g, '__NL__');
+    var bdyFlat = esc(body).replace(/\r?\n/g, '__NL__');
+    out += '__DET__' + sumFlat + '__SEP__' + bdyFlat + '__END__';
   }
   raw = out;
 
@@ -2072,8 +2100,8 @@ function renderChatContent(raw, isUser) {
     if (line.startsWith('__DET__')) {
       var p1 = line.indexOf('__SEP__');
       var p2 = line.indexOf('__END__');
-      var sumEsc = p1 !== -1 ? line.slice(7, p1) : '';
-      var bdyEsc = (p1 !== -1 && p2 !== -1) ? line.slice(p1 + 7, p2) : '';
+      var sumEsc = p1 !== -1 ? line.slice(7, p1).replace(/__NL__/g, ' ') : '';
+      var bdyEsc = (p1 !== -1 && p2 !== -1) ? line.slice(p1 + 7, p2).replace(/__NL__/g, String.fromCharCode(10)) : '';
       var after  = p2 !== -1 ? line.slice(p2 + 7) : '';
       output.push(
         '<details><summary>' + sumEsc + '</summary>' +
@@ -2201,7 +2229,8 @@ function chatSend() {
   // Show typing indicator
   chatAppendStreamingBubble();
 
-  var body = JSON.stringify({ message: msg, conversationId: currentConvId || undefined, project: chatProject });
+  var cheapCb = document.getElementById('chat-cheap-mode');
+  var body = JSON.stringify({ message: msg, conversationId: currentConvId || undefined, project: chatProject, cheap_mode: !!(cheapCb && cheapCb.checked) });
   var streamContent = '';
 
   fetch('/api/chat', {
@@ -2414,12 +2443,16 @@ function btOpenProject(slug) {
   document.getElementById('bt-project-detail').style.display = 'block';
   document.getElementById('bt-download-btn').style.display = 'none';
   document.getElementById('bt-run-status').style.display = 'none';
+  document.getElementById('bt-clarify').style.display = 'none';
+  document.getElementById('bt-budget').style.display = 'none';
   document.getElementById('bt-tasks-rows').innerHTML = '';
 
   apiFetch('/api/bullettrain/projects/' + encodeURIComponent(slug))
     .then(function(r) { return r.json(); })
     .then(function(d) {
       document.getElementById('bt-detail-title').textContent = d.project.title + '  (' + d.project.slug + ')';
+      btRenderClarify(d.clarification);
+      btRenderBudget(d.budget);
       var startBtn = document.getElementById('bt-start-run-btn');
       startBtn.disabled = !!d.project.current_run;
       startBtn.textContent = d.project.current_run ? 'Run in progress...' : 'Start run';
@@ -2528,6 +2561,157 @@ function btRenderStatus(slug, runNo, d) {
   }).join('');
 }
 
+// -- BulletTrain brief clarification (advisory question link) ---------------------
+// When the project brief leaves a consequential dimension unspecified, the
+// project detail view shows a question link. Clicking it opens a multi-choice
+// panel (the same <=5-question shape as the Agentic Team intake). Saving folds
+// the selections into the brief via POST /clarify; it never blocks a run.
+
+var btClarify = null;    // current clarification state from GET /projects/:slug
+var btClarifySel = {};   // selections: { "<questionIndex>": optionId | freeText }
+
+function btRenderClarify(clar) {
+  var box = document.getElementById('bt-clarify');
+  var panel = document.getElementById('bt-clarify-panel');
+  btClarify = (clar && clar.isConsequential && clar.questions && clar.questions.length) ? clar : null;
+  btClarifySel = {};
+  if (!btClarify) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  document.getElementById('bt-clarify-link').textContent =
+    'Answer setup questions (' + btClarify.questions.length + ')';
+  panel.style.display = 'none';
+  btRenderClarifyQuestions();
+}
+
+function btToggleClarify() {
+  var panel = document.getElementById('bt-clarify-panel');
+  panel.style.display = (panel.style.display === 'none') ? 'block' : 'none';
+}
+
+function btHideClarify() {
+  document.getElementById('bt-clarify-panel').style.display = 'none';
+}
+
+function btRenderClarifyQuestions() {
+  var box = document.getElementById('bt-clarify-questions');
+  if (!btClarify) { box.innerHTML = ''; return; }
+  box.innerHTML = btClarify.questions.map(function(q, i) {
+    var type = q.multiple ? 'checkbox' : 'radio';
+    var opts = q.options.map(function(o, j) {
+      var letter = String.fromCharCode(65 + j);
+      return '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--r);cursor:pointer;margin-bottom:4px;">' +
+        '<input type="' + type + '" name="btq' + i + '" value="' + escapeHtml(o.id) + '" onchange="btClarifyPick(' + i + ', this)">' +
+        '<span><span style="font-weight:600">' + letter + '. ' + escapeHtml(o.label) + '</span>' +
+        (o.description ? '<span style="color:var(--text-dim);display:block;font-size:11px;">' + escapeHtml(o.description) + '</span>' : '') +
+        '</span></label>';
+    }).join('');
+    var writeIn = '<div style="margin-top:4px;"><input type="text" id="btq' + i + '-writein" placeholder="Or type your own answer" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg);color:var(--text);" oninput="btClarifyWriteIn(' + i + ', this)"></div>';
+    return '<div style="margin-bottom:14px;">' +
+      '<div style="font-weight:600;margin-bottom:6px;">' + (i + 1) + '. ' + escapeHtml(q.header) + ' - ' + escapeHtml(q.question) + '</div>' +
+      opts + writeIn + '</div>';
+  }).join('');
+}
+
+function btClarifyPick(idx, el) {
+  var q = btClarify && btClarify.questions[idx];
+  if (!q) return;
+  var w = document.getElementById('btq' + idx + '-writein');
+  if (q.multiple) {
+    var checked = Array.prototype.slice.call(document.querySelectorAll('input[name="btq' + idx + '"]:checked')).map(function(c) { return c.value; });
+    btClarifySel[String(idx)] = checked.join(',');
+    if (w) w.value = '';
+  } else {
+    btClarifySel[String(idx)] = el.value;
+    if (w) w.value = '';
+  }
+}
+
+function btClarifyWriteIn(idx, el) {
+  if (el.value.trim()) btClarifySel[String(idx)] = el.value.trim();
+}
+
+function btSubmitClarify() {
+  if (!btCurrentSlug || !btClarify) return;
+  apiFetch('/api/bullettrain/projects/' + encodeURIComponent(btCurrentSlug) + '/clarify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ answers: btClarifySel }),
+  })
+  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+  .then(function(res) {
+    if (!res.ok) { alert(res.d.error || 'Failed to save answers.'); return; }
+    btHideClarify();
+    btOpenProject(btCurrentSlug);
+  })
+  .catch(function(e) { alert('Network error: ' + e.message); });
+}
+
+// -- BulletTrain per-project budget (optional) ---------------------------------
+// Optional cumulative token / wall-clock cap for a project. Setting it is
+// advisory: a run stops gracefully at the cap (packages what it has, writes the
+// report) -- it never fails or produces no output. API state shape:
+//   { budget: { tokens?, wallHours? } | null, usage: { tokens, wallSeconds } }
+
+function btRenderBudget(state) {
+  var box = document.getElementById('bt-budget');
+  if (!state) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  var budget = state.budget || null;
+  var usage = state.usage || { tokens: 0, wallSeconds: 0 };
+
+  document.getElementById('bt-budget-tokens').value = (budget && budget.tokens) ? budget.tokens : '';
+  document.getElementById('bt-budget-wallhours').value = (budget && budget.wallHours) ? budget.wallHours : '';
+
+  var usedHours = usage.wallSeconds / 3600;
+  var statusEl = document.getElementById('bt-budget-status');
+  var usageEl = document.getElementById('bt-budget-usage');
+  if (!budget) {
+    statusEl.textContent = 'off';
+    usageEl.textContent = 'Used so far: ' + usage.tokens.toLocaleString() + ' tokens, ' + usedHours.toFixed(2) + 'h';
+  } else {
+    var parts = [];
+    if (budget.tokens) parts.push(usage.tokens.toLocaleString() + ' / ' + budget.tokens.toLocaleString() + ' tokens');
+    if (budget.wallHours) parts.push(usedHours.toFixed(2) + 'h / ' + budget.wallHours + 'h');
+    statusEl.textContent = 'on';
+    usageEl.textContent = 'Used so far: ' + parts.join(', ');
+  }
+}
+
+function btSaveBudget() {
+  if (!btCurrentSlug) return;
+  var tokensRaw = document.getElementById('bt-budget-tokens').value;
+  var wallRaw = document.getElementById('bt-budget-wallhours').value;
+  var budget = {};
+  if (tokensRaw.trim()) budget.tokens = Number(tokensRaw);
+  if (wallRaw.trim()) budget.wallHours = Number(wallRaw);
+  apiFetch('/api/bullettrain/projects/' + encodeURIComponent(btCurrentSlug) + '/budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ budget: budget }),
+  })
+  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+  .then(function(res) {
+    if (!res.ok) { alert(res.d.error || 'Failed to save budget.'); return; }
+    btRenderBudget(res.d.budget);
+  })
+  .catch(function(e) { alert('Network error: ' + e.message); });
+}
+
+function btClearBudget() {
+  if (!btCurrentSlug) return;
+  apiFetch('/api/bullettrain/projects/' + encodeURIComponent(btCurrentSlug) + '/budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ budget: null }),
+  })
+  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+  .then(function(res) {
+    if (!res.ok) { alert(res.d.error || 'Failed to clear budget.'); return; }
+    btRenderBudget(res.d.budget);
+  })
+  .catch(function(e) { alert('Network error: ' + e.message); });
+}
+
 // -- Direct Chat ----------------------------------------------------------------
 // One model plus Orchestrail tools, no team pipeline. Conversations are stored
 // with mode 'direct' and listed only here; the Agentic Team list hides them.
@@ -2578,6 +2762,8 @@ function dcRenderProjects() {
     names.map(function(n){ return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') +
     '<option value="__new__">+ New project...</option>';
   sel.value = dcProject || '';
+  var scope = document.getElementById('dc-project-scope');
+  if (scope) scope.innerHTML = renderWikiScopeLine(dcProject);
 }
 
 function dcProjectChanged() {

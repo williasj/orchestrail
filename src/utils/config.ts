@@ -7,7 +7,8 @@ import * as path from "path"
 export const PORT               = process.env.PORT || 8080
 export const MODEL_ID           = "orchestrail"
 export const DATA_DIR           = process.env.DATA_DIR || "/data"
-export const PIPELINES_API_KEY  = process.env.PIPELINES_API_KEY || "change-me"
+export const PIPELINES_API_KEY_DEFAULT = "change-me"
+export const PIPELINES_API_KEY         = process.env.PIPELINES_API_KEY || PIPELINES_API_KEY_DEFAULT
 export const SKILLS_DIR         = process.env.SKILLS_DIR || path.join(DATA_DIR, "skills")
 
 export const AGENTS_FILE           = path.join(DATA_DIR, "agents.json")

@@ -14,12 +14,16 @@ import { btWikiRunEnd, btWikiRunStart } from './wiki.js'
 import {
   listProjects, readProject, writeProject, readRuntime, readStatus, writeStatus, readTasks, writeTasks,
   writeReport, writeSessionRecord, nextRunNo, readBrief, writeDeliverableZip,
+  readProjectBudget, writeProjectBudget,
 } from './store.js'
+import { budgetEnabled, checkBudget, renderBudgetSection, type BTUsage, type BTBudget } from './budget.js'
 import { btExecHealthy, btBash, btWorkbenchRunId } from './execClient.js'
 import { planTasks } from './planner.js'
 import { runSession } from './session.js'
 import { runVerify } from './verify.js'
 import { packageDeliverableZip } from './zip.js'
+import { parseVerifyReport, summarizeVerifyQuality } from './verifyquality.js'
+import type { VerifyReport } from './verifyquality.js'
 import type { BTStatus, BTTask, BTHaltReason } from './types.js'
 
 function findReadyTask(tasks: BTTask[]): BTTask | null {
@@ -61,6 +65,17 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
   let status = readStatus(slug, runNo)
   const startWall = Date.now()
 
+  // Optional per-project budget (off by default). priorUsage is the cumulative
+  // usage from prior runs; runTokens accumulates this run's tokens as sessions
+  // complete. On exhaustion the run breaks to the normal done path (package +
+  // report + clean state) -- never a halt with no output. The cumulative usage
+  // is persisted in the finally block regardless of how the run ends.
+  const budgetState = readProjectBudget(slug)
+  const budget = budgetState.budget
+  const priorUsage: BTUsage = budgetState.usage
+  let runTokens = 0
+  let budgetStopped = false
+
   try {
     // -- recon --------------------------------------------------------------
     status.state = 'running'
@@ -101,6 +116,10 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
     // -- select / session / verify loop ----------------------------------------
     let sessionsSinceVerification = 0
     let verifyAttemptCounters: Record<string, number> = {}
+    // Per-task structured verify report from the most recent verify attempt (the
+    // verify command's stdout, if it emitted "VERIFY <name> PASS|FAIL|SKIP" lines).
+    // Advisory only -- surfaced in the run report, never a pass/fail gate.
+    const verifyReports: Record<string, VerifyReport> = {}
 
     while (true) {
       tasks = readTasks(slug, runNo)
@@ -124,6 +143,22 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
         return
       }
 
+      // Per-project budget (optional). Checked at a session boundary, before any
+      // new session starts: if the cumulative spend (prior runs + this run so far)
+      // has reached the cap, stop cleanly by breaking to the done path (package +
+      // report + clean state) instead of halting with no output.
+      if (budgetEnabled(budget)) {
+        const runWallSeconds = Math.floor((Date.now() - startWall) / 1000)
+        const effectiveUsage: BTUsage = {
+          tokens: priorUsage.tokens + runTokens,
+          wallSeconds: priorUsage.wallSeconds + runWallSeconds,
+        }
+        if (checkBudget(effectiveUsage, budget).exhausted) {
+          budgetStopped = true
+          break
+        }
+      }
+
       setPhase(status, 'select', 'Selecting next ready task')
       const task = findReadyTask(tasks)
       if (!task) {
@@ -144,6 +179,9 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
       const outcome = await runSession(slug, runNo, status.session_no, task, runtime)
       writeSessionRecord(slug, runNo, outcome.record)
       status.counters.sessions_run += 1
+      status.counters.prompt_tokens += outcome.record.prompt_tokens
+      status.counters.completion_tokens += outcome.record.completion_tokens
+      runTokens += outcome.record.prompt_tokens + outcome.record.completion_tokens
 
       if (outcome.haltReason) {
         halt(status, outcome.haltReason, outcome.reconOverBudget
@@ -156,6 +194,7 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
       verifyAttemptCounters[task.id] = (verifyAttemptCounters[task.id] ?? task.attempts) + 1
       const attemptN = verifyAttemptCounters[task.id]!
       const verifyOutcome = await runVerify(slug, runNo, task.id, attemptN, task.verify, runtime)
+      verifyReports[task.id] = parseVerifyReport(verifyOutcome.stdout)
 
       const freshTasks = readTasks(slug, runNo)
       const idx = freshTasks.findIndex(t => t.id === task.id)
@@ -201,16 +240,20 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
       writeDeliverableZip(slug, runNo, zipResult.buffer)
     }
 
+    const finalUsage: BTUsage = {
+      tokens: priorUsage.tokens + runTokens,
+      wallSeconds: priorUsage.wallSeconds + Math.floor((Date.now() - startWall) / 1000),
+    }
     const finalTasks = readTasks(slug, runNo)
-    const report = buildReport(slug, runNo, finalTasks, status, zipResult.ok, zipResult.error, zipResult.truncated)
+    const report = buildReport(slug, runNo, finalTasks, status, zipResult.ok, zipResult.error, verifyReports, budget, finalUsage, budgetStopped)
     writeReport(slug, runNo, report)
 
     status.state = 'done'
     status.phase = null
     status.ended_at = new Date().toISOString()
-    status.message = zipResult.ok
-      ? `Done -- ${status.counters.tasks_verified} verified, deliverable packaged`
-      : `Done -- ${status.counters.tasks_verified} verified, but zip packaging failed: ${zipResult.error}`
+    status.message = (budgetStopped ? 'Done (budget reached) -- ' : 'Done -- ') +
+      `${status.counters.tasks_verified} verified, ` +
+      (zipResult.ok ? 'deliverable packaged' : `zip packaging failed: ${zipResult.error}`)
     writeStatus(status)
   } catch (err) {
     status = readStatus(slug, runNo)
@@ -219,6 +262,18 @@ export async function runSupervisor(slug: string, runNo: string): Promise<void> 
     status.message = `Supervisor internal error: ${String(err instanceof Error ? err.message : err)}`
     writeStatus(status)
   } finally {
+    // Persist the project's cumulative usage (prior + this run) regardless of how
+    // the run ended (done / halted / failed), so the next run's budget check sees
+    // the true total. Best-effort: a write failure must never mask the run's own
+    // terminal state.
+    try {
+      const finalWall = Math.floor((Date.now() - startWall) / 1000)
+      writeProjectBudget(slug, {
+        budget,
+        usage: { tokens: priorUsage.tokens + runTokens, wallSeconds: priorUsage.wallSeconds + finalWall },
+      })
+    } catch { /* budget persistence is best-effort; never fail the run over it */ }
+
     const p = readProject(slug)
     if (p && p.current_run === runNo) {
       p.current_run = null
@@ -261,7 +316,9 @@ function slug(p: { slug: string }): string { return p.slug }
 
 function buildReport(
   slug: string, runNo: string, tasks: BTTask[], status: BTStatus,
-  zipOk: boolean, zipError: string | undefined, zipTruncated: boolean | undefined,
+  zipOk: boolean, zipError: string | undefined,
+  verifyReports: Record<string, VerifyReport>,
+  budget: BTBudget | null, finalUsage: BTUsage, budgetStopped: boolean,
 ): string {
   const lines = [
     `# BulletTrain run report -- ${slug} run ${runNo}`,
@@ -274,9 +331,13 @@ function buildReport(
     '## Tasks',
     ...tasks.map(t => `- [${t.mark}] ${t.id} ${t.title}${t.error ? ` -- ${t.error}` : ''}`),
     '',
+    '## Verify quality',
+    ...summarizeVerifyQuality(tasks, verifyReports),
+    '',
+    ...renderBudgetSection(finalUsage, budget, budgetStopped),
     '## Deliverable',
     zipOk
-      ? `Packaged at runs/${runNo}/deliverable.zip${zipTruncated ? ' (WARNING: likely truncated at the exec stdout cap -- raise MAX_OUTPUT_BYTES on orchestrail-exec)' : ''}`
+      ? `Packaged at runs/${runNo}/deliverable.zip`
       : `Packaging failed: ${zipError}`,
   ]
   return lines.join('\n') + '\n'

@@ -385,6 +385,7 @@ export async function runSkill(
   name:  string,
   input: unknown,
   exec:  CodeExecFn,
+  opts?: { record?: boolean },
 ): Promise<SkillRunResult> {
   const empty = (error: string): SkillRunResult =>
     ({ ok: false, exit_code: 1, stdout: '', stderr: '', duration_ms: 0, error })
@@ -420,7 +421,11 @@ export async function runSkill(
 
   // Record a real invocation (this is the point of executable skills: stats mean
   // actual executions, not prompt-recalls). Fire-and-forget on the lifecycle.
-  recordInvocation(folder, name, ok).catch(() => {})
+  // opts.record === false suppresses this: the orchestrator's mutation probe runs
+  // the harness many times against deliberately-broken mutants, and recording each
+  // (killed mutants report ok:false) would inflate python-run-tests' failure count
+  // and trip the skill-cap decay. Those runs are probe traffic, not real use.
+  if (opts?.record !== false) recordInvocation(folder, name, ok).catch(() => {})
 
   return {
     ok, exit_code: out.exit_code, result,

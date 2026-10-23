@@ -91,6 +91,11 @@ export interface BTSessionRecord {
   tool_calls: number
   prompt_tokens_peak: number
   ctx_pct_peak: number
+  // Total tokens consumed by this session across all its LLM calls (the
+  // per-run counters and the per-project budget both sum these). Distinct from
+  // prompt_tokens_peak (the single largest prompt, used for the ctx trigger).
+  prompt_tokens: number
+  completion_tokens: number
   handoff_written: boolean
   commits: string[]
   nap_turns: number

@@ -11,6 +11,7 @@ import { memoryEnabled, qdrantUpsert } from './memory.js'
 import { callCoordinatorLLM } from './llm.js'
 import { DEFAULT_SYNTHESIS_PROMPT } from './prompts.js'
 import { appendToolLog } from './tools.js'
+import { describeRunFacts, detectSynthesisAnomalies, renderAnomalyRegister } from '../utils/anomaly.js'
 import type { AgentResult, CoordinatorConfig, AgenticMessage } from '../types/index.js'
 
 // -- Module init ---------------------------------------------------------------
@@ -204,7 +205,21 @@ export async function synthesize(
       + 'Treat the output below as unverified: do not ship it without re-running verification to a clean pass.\n\n'
     : ''
   const finalOutput = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
-  const assembled   = failureBanner + implHeader + finalOutput
+
+  // Anomaly register (issue A4): the synthesis narrative is model-authored and can
+  // misreport the run's HISTORY -- e.g. "no test corrections needed" after a test
+  // was rewritten, or a "found->fixed->confirmed" arc on a run that never reworked.
+  // The run record (results) is the ground truth: every escalation, every "Fix:"
+  // helper agent, every re-run, and every verification outcome is recorded by the
+  // orchestrator, not the model. detectSynthesisAnomalies checks the narrative's
+  // history claims against that record and, on a contradiction, appends a
+  // machine-authored register that names it and defers to the run record. Advisory
+  // only (never a hard gate): it flags the contradiction for the reader.
+  const runFacts  = describeRunFacts(results)
+  const anomalies = detectSynthesisAnomalies(runFacts, finalOutput)
+  const anomalyRegister = renderAnomalyRegister(anomalies)
+
+  const assembled   = failureBanner + implHeader + finalOutput + anomalyRegister
   const durationMs  = Date.now() - t0
 
   appendToolLog({
@@ -213,6 +228,7 @@ export async function synthesize(
       goal:       goal.slice(0, 500),
       agentCount: results.filter(r => r.success).length,
       agents:     [...new Set(results.map(r => r.assignee))],
+      anomalies:  anomalies.map(a => a.code),
     },
     result: JSON.stringify({ preview: assembled.slice(0, 300) }),
     ok: true, durationMs,

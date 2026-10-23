@@ -39,4 +39,26 @@ else
   fi
 fi
 
+# Verify bwrap is available (needed for per-run bash isolation, see
+# isolation.mjs). Fail closed so a misconfigured image does not silently run
+# agent code without per-run isolation.
+if [ "${EXEC_ISOLATION:-on}" != "off" ]; then
+  if ! command -v bwrap >/dev/null 2>&1; then
+    echo "[entrypoint] FATAL: bwrap not found (needed for per-run bash isolation)." >&2
+    echo "[entrypoint] Rebuild the image with bubblewrap installed (see Dockerfile)." >&2
+    exit 1
+  fi
+  # Self-test: the binary existing is not enough -- the container must also be
+  # allowed to create the namespaces/mounts. Fail at boot, not on every bash call.
+  if ! bwrap_err=$(bwrap --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
+        --unshare-user --unshare-pid --unshare-uts --unshare-ipc --cap-drop ALL --die-with-parent --new-session \
+        /bin/true 2>&1); then
+    echo "[entrypoint] FATAL: bwrap self-test failed: $bwrap_err" >&2
+    echo "[entrypoint] Set security_opt: [apparmor:unconfined, systempaths=unconfined, seccomp:unconfined] (no SYS_ADMIN needed)," >&2
+    echo "[entrypoint] or set EXEC_ISOLATION=off to run without per-run isolation (not recommended)." >&2
+    exit 1
+  fi
+  echo "[entrypoint] bwrap self-test OK (per-run bash isolation active)"
+fi
+
 exec node /srv/server.mjs

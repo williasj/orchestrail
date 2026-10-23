@@ -32,6 +32,11 @@ export interface TeamAgent {
   requiresVerifiedExecution?: boolean     // if set, complete_stage DONE on a CODE task (runtimes slot populated)
                                           // is rejected unless a real execution (use_skill or a bash run) actually
                                           // ran AND passed. Outcome-based verification gate; capability-agnostic.
+  requiresAdversarialVerdict?: boolean    // if set, the agent is the independent adversarial verifier (item 11):
+                                          // the team's test_report / test_harness are WITHHELD from it (workbench_read
+                                          // refuses, workbench_list hides), and complete_stage DONE on a CODE task is
+                                          // rejected unless it recorded a well-formed adversarial_verdict (its OWN
+                                          // probes, run for real) with ZERO failures.
 }
 
 export interface ToolConfig {
@@ -79,6 +84,7 @@ export interface AgentResult {
   success:    boolean
   completion?: StageCompletion
   tokens?:    number          // total tokens consumed by this agent's stage (delta of the per-request accumulator)
+  durationMs?: number         // wall-time of this agent's stage (ms), captured by runAgent alongside the token delta
   _messages?: AgenticMessage[]
   // Capability-based verification outcome for this stage. Populated only when the
   // agent was flagged requiresVerifiedExecution AND this was a CODE task (runtimes

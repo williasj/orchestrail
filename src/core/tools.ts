@@ -7,7 +7,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import {
-  RAG_MANAGER_CACHE_TTL, WORKBENCH_SENTINEL, cols, CODE_EXEC_URL, SOURCE_ROOT,
+  RAG_MANAGER_CACHE_TTL, WORKBENCH_SENTINEL, cols, CODE_EXEC_URL, SOURCE_ROOT, DATA_DIR,
 } from '../utils/config.js'
 import { appendPendingChange } from './persistence.js'
 import {
@@ -21,6 +21,8 @@ import {
   isObviouslyProse, stripCodeBlockDelimiters, stripThinkBlocks,
   detectDuplicateMain, detectStructRedefinition, ensurePyFutureAnnotations,
 } from '../utils/text.js'
+import { isWithheldFromVerifier, filterWithheldSlots } from '../utils/adversarial.js'
+import { validateFetchUrl, buildFetchResult, FETCH_TEXT_MAX_CHARS } from '../utils/webfetch.js'
 import type {
   TeamAgent, ToolConfig, RagManagerEndpoint, RagManagerSpec, ToolLogEntry,
 } from '../types/index.js'
@@ -269,6 +271,14 @@ export async function fetchAgentTools(agent: TeamAgent): Promise<{ defs: unknown
   urlMap.set('workbench_search', WORKBENCH_SENTINEL)
   urlMap.set('list_runtimes',    WORKBENCH_SENTINEL)
 
+  // Controlled page fetch (A5): exposed to any agent that has an enabled web
+  // search tool, so it complements web_search (pull the full docs page behind a
+  // promising snippet) instead of standing alone.
+  if (assignedTools.some(t => t.type === 'searxng')) {
+    defs.push(...buildFetchPageTool())
+    urlMap.set('fetch_page', WEBFETCH_SENTINEL)
+  }
+
   // Inject executable-skill tools when the subsystem is enabled AND this agent
   // can already execute code. Skills run real code through the same path as the
   // exec tools, so the right to invoke a skill is the same capability as the
@@ -285,6 +295,10 @@ export async function fetchAgentTools(agent: TeamAgent): Promise<{ defs: unknown
     defs.push(...buildSkillTools())
     urlMap.set('use_skill',    SKILL_SENTINEL)
     urlMap.set('create_skill', SKILL_SENTINEL)
+  }
+  if (canExecuteCode) {
+    defs.push(...buildDeliverTool())
+    urlMap.set('deliver', DELIVER_SENTINEL)
   }
   // Inject AIWiki tools when the agent has a tool of type 'aiwiki' assigned
   if (assignedTools.some(t => t.type === 'aiwiki')) {
@@ -586,6 +600,93 @@ function buildSkillTools(): unknown[] {
   ]
 }
 
+// -- Deliver capability tool ---------------------------------------------------
+// Surface a file the agent produced in the sandbox to the user as a download.
+// The file is fetched from the exec sidecar (raw bytes over HTTP), stored under
+// DATA_DIR/deliverables/<convToken>/, and served by the orchestrail server's
+// auth-gated download route. Gated on canExecuteCode (the agent has bash).
+
+export const DELIVER_SENTINEL = '__deliver__'
+
+export const DELIVER_EXTENSIONS = new Set(['.xlsx', '.zip', '.pdf', '.png'])
+export const DELIVER_MAX_BYTES  = parseInt(process.env.DELIVER_MAX_BYTES || String(50 * 1024 * 1024), 10)
+
+export const DELIVER_MIME: Record<string, string> = {
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.zip':  'application/zip',
+  '.pdf':  'application/pdf',
+  '.png':  'image/png',
+}
+
+export function deliverableConvToken(conversationId: string): string {
+  return conversationId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64)
+}
+
+export function deliverableStoreDir(convToken: string): string {
+  return path.join(DATA_DIR, 'deliverables', convToken)
+}
+
+function buildDeliverTool(): unknown[] {
+  return [{
+    type: 'function',
+    function: {
+      name: 'deliver',
+      description:
+        'Surface a file you produced in the sandbox to the user as a download. ' +
+        'The file must exist in the run working directory and have one of these extensions: ' +
+        '.xlsx, .zip, .pdf, .png. Returns a stable download URL the user can click.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Relative path of the file in the run working directory, e.g. "report.xlsx" or "output/data.zip".' },
+        },
+        required: ['path'],
+      },
+    },
+  }]
+}
+
+// -- Controlled page fetch (frontier A5) -----------------------------------------
+// The architect / single-agent "rarely use web search" and web_search returns
+// snippets only. fetch_page lets an agent pull the FULL text of a documentation
+// page it found via web_search. Controlled: docs domains only, SSRF-safe -- the
+// decision logic lives in the pure leaf src/utils/webfetch.ts (unit-tested by
+// webfetch.check.mjs). Gated on the agent having an enabled searxng tool so it
+// complements web search rather than standing alone.
+export const WEBFETCH_SENTINEL = '__webfetch__'
+
+const WEBFETCH_TIMEOUT_MS = 20_000
+
+// Widens the docs-domain allowlist at runtime. Comma-separated env var; the leaf
+// stays pure (no env read) and tools.ts is the only place that reads it.
+function webfetchExtraDomains(): Set<string> {
+  const raw = process.env.WEBFETCH_EXTRA_DOMAINS ?? ''
+  return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))
+}
+
+function buildFetchPageTool(): unknown[] {
+  return [{
+    type: 'function',
+    function: {
+      name: 'fetch_page',
+      description:
+        'Fetch the FULL text of a documentation page (not just a search snippet). ' +
+        'Use after web_search when a result looks authoritative and you need the real ' +
+        'content. Only documentation domains are allowed (docs./developer./readthedocs/' +
+        'learn./reference-style hosts plus a built-in allowlist); private/internal ' +
+        'addresses and non-docs pages are refused. Returns the page as readable text ' +
+        '(truncated to ~12000 chars).',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Absolute http(s) URL of the documentation page to fetch, e.g. "https://docs.python.org/3/library/json.html".' },
+        },
+        required: ['url'],
+      },
+    },
+  }]
+}
+
 // Resolve the URL of the registered exec tool server (its defs GET URL is also
 // its POST target). Cached. CODE_EXEC_URL overrides discovery when set. Discovery
 // now keys on the `bash` tool -- the orchestrail-exec server advertises bash /
@@ -691,7 +792,7 @@ export const runCodeViaTool: CodeExecFn = async (language, code, stdin) => {
 // resolve instead. This makes the skill path robust to whatever module name the
 // agent guessed (fibonacci / main / implementation). Lines importing any non-impl
 // symbol (stdlib, third-party) are preserved untouched.
-function stripRedundantImplImports(code: string, testCode: string): string {
+export function stripRedundantImplImports(code: string, testCode: string): string {
   const symbols = new Set<string>()
   for (const m of code.matchAll(/^[ \t]*(?:def|class)[ \t]+(\w+)/gm)) symbols.add(m[1]!)
   if (symbols.size === 0) return testCode
@@ -769,11 +870,24 @@ export async function executeToolCall(
   // Workbench sentinel
   if (url === WORKBENCH_SENTINEL) {
     if (name === 'workbench_list') {
-      const slots = wbList()
+      // Adversarial-verifier withholding (item 11): the team's test_report /
+      // test_harness (and orchestrator-internal slots) are hidden from the
+      // independent verifier so it cannot anchor on the team's tests.
+      const verifier = agentMap().get(specAssignee ?? '')?.requiresAdversarialVerdict ?? false
+      const slots = filterWithheldSlots(wbList(), verifier)
       return slots.length ? JSON.stringify(slots) : JSON.stringify(['(workbench is empty)'])
     }
     if (name === 'workbench_read') {
       const slot = String(args['slot'] ?? '')
+      // Adversarial-verifier withholding (item 11): the team's test_report /
+      // test_harness are withheld from the independent verifier so it cannot
+      // anchor on them. It derives its own probes from the spec + implementation.
+      if (agentMap().get(specAssignee ?? '')?.requiresAdversarialVerdict
+          && isWithheldFromVerifier(slot)) {
+        return JSON.stringify({ error: `BLOCKED: slot "${slot}" is withheld from the adversarial verifier. `
+          + "You verify independently: derive your own probes from the requestor's spec and the implementation, "
+          + 'run them, and record the adversarial_verdict slot.' })
+      }
       const content = wbGet(slot)
       if (content === null) {
         return JSON.stringify({ error: `No artifact at slot "${slot}". Call workbench_list to see available slots.` })
@@ -1140,6 +1254,98 @@ export async function executeToolCall(
       })
     }
     return JSON.stringify({ error: `Unknown self-improvement operation: ${name}` })
+  }
+
+  // Deliver sentinel
+  if (url === DELIVER_SENTINEL) {
+    if (name === 'deliver') {
+      const relPath = String(args['path'] ?? '')
+      if (!relPath) return JSON.stringify({ error: 'path is required' })
+
+      const ext = path.extname(relPath).toLowerCase()
+      if (!DELIVER_EXTENSIONS.has(ext)) {
+        return JSON.stringify({ error: `File type not allowed for delivery: ${ext}. Allowed: .xlsx, .zip, .pdf, .png` })
+      }
+
+      const runId = workbenchIdStorage.getStore() ?? 'default'
+      const ctx   = toolLogContextStorage.getStore()
+      const convId = ctx?.conversationId ?? ''
+      if (!convId) return JSON.stringify({ error: 'No conversation context available for deliver' })
+
+      const convToken = deliverableConvToken(convId)
+
+      try {
+        const execUrl = await resolveCodeExecUrl()
+        if (!execUrl) return JSON.stringify({ error: 'no exec endpoint registered (set CODE_EXEC_URL or enable an orchestrail-exec tool)' })
+
+        const deliverUrl = `${execUrl.replace(/\/+$/, '')}/deliver?runId=${encodeURIComponent(runId)}&path=${encodeURIComponent(relPath)}`
+        const res = await fetch(deliverUrl, { signal: AbortSignal.timeout(60_000) })
+        if (!res.ok) {
+          const errText = await res.text()
+          return JSON.stringify({ error: `deliver failed: HTTP ${res.status} ${errText.slice(0, 200)}` })
+        }
+
+        const buf = Buffer.from(await res.arrayBuffer())
+        if (buf.length > DELIVER_MAX_BYTES) {
+          return JSON.stringify({ error: `File too large: ${buf.length} bytes (max ${DELIVER_MAX_BYTES})` })
+        }
+
+        const filename = path.basename(relPath)
+        const storeDir = deliverableStoreDir(convToken)
+        fs.mkdirSync(storeDir, { recursive: true })
+        const storePath = path.join(storeDir, filename)
+        fs.writeFileSync(storePath, buf)
+
+        const downloadUrl = `/api/deliver/${convToken}/${encodeURIComponent(filename)}`
+        console.log(`[deliver] stored ${filename} (${buf.length}b) -> ${storePath}`)
+        return JSON.stringify({ ok: true, filename, bytes: buf.length, downloadUrl })
+      } catch (err) {
+        return JSON.stringify({ error: String(err) })
+      }
+    }
+    return JSON.stringify({ error: `Unknown deliver operation: ${name}` })
+  }
+
+  // Controlled page fetch sentinel (A5)
+  if (url === WEBFETCH_SENTINEL) {
+    if (name !== 'fetch_page') return JSON.stringify({ error: `Unknown fetch operation: ${name}` })
+    const rawUrl = String(args['url'] ?? '')
+    const verdict = validateFetchUrl(rawUrl, webfetchExtraDomains())
+    if (!verdict.ok) return JSON.stringify({ error: verdict.error })
+    try {
+      // Follow redirects MANUALLY and validate every hop before requesting it, so
+      // an allowed docs host cannot bounce the request to an internal address.
+      let target = verdict.url
+      let res: Response | null = null
+      for (let hop = 0; hop <= 5; hop++) {
+        res = await fetch(target, {
+          signal:   AbortSignal.timeout(WEBFETCH_TIMEOUT_MS),
+          headers:  { 'User-Agent': 'orchestrail-fetch-page/1.0', 'Accept': 'text/html,application/xhtml+xml' },
+          redirect: 'manual',
+        })
+        if (res.status < 300 || res.status >= 400) break
+        const loc = res.headers.get('location')
+        if (!loc) break
+        if (hop === 5) return JSON.stringify({ error: 'fetch failed: too many redirects' })
+        const hopVerdict = validateFetchUrl(new URL(loc, target).toString(), webfetchExtraDomains())
+        if (!hopVerdict.ok) return JSON.stringify({ error: `fetch blocked at redirect: ${hopVerdict.error}` })
+        target = hopVerdict.url
+      }
+      if (!res) return JSON.stringify({ error: 'fetch failed: no response' })
+      const contentType = res.headers.get('content-type') ?? ''
+      if (!res.ok) {
+        return JSON.stringify({ error: `fetch failed: HTTP ${res.status} for ${target}` })
+      }
+      // Only reduce text-like bodies; a binary download is not a docs page.
+      if (contentType && !/text\/html|application\/xhtml|text\/plain/.test(contentType)) {
+        return JSON.stringify({ error: `not a text page: Content-Type ${contentType} for ${target}` })
+      }
+      const body = await res.text()
+      const result = buildFetchResult(target, res.status, contentType, body, FETCH_TEXT_MAX_CHARS)
+      return JSON.stringify(result)
+    } catch (err) {
+      return JSON.stringify({ error: `fetch request failed: ${String(err)}` })
+    }
   }
 
   // RAG search sentinel

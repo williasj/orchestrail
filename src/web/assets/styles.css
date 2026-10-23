@@ -55,6 +55,16 @@
   .dc-tool{font-family:var(--mono);font-size:11px;padding:3px 9px;border:1px solid var(--border);border-radius:999px;cursor:pointer;color:var(--text-muted);background:var(--bg);user-select:none;}
   .dc-tool.on{color:var(--text);border-color:var(--accent,#6aa0ff);background:var(--surface);}
 
+  /* AIWiki scoping rule (E2): makes the "unbound sees everything but writes
+     nothing" rule explicit in the UI. Badge = current binding; rule = what the
+     agents can read/write; invariant = the per-user boundary. */
+  .wiki-scope{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}
+  .wiki-scope-badge{font-family:var(--mono);font-size:11px;line-height:1;padding:3px 8px;border-radius:3px;border:1px solid var(--border);color:var(--text);background:var(--surface2);white-space:nowrap;}
+  .wiki-scope-badge.wiki-scope-bound{border-color:rgba(0,200,150,.3);color:var(--accent);background:var(--accent-dim);}
+  .wiki-scope-badge.wiki-scope-unbound{border-color:var(--border);color:var(--text-dim);background:var(--surface2);}
+  .wiki-scope-rule{color:var(--text);font-size:12px;}
+  .wiki-scope-inv{color:var(--text-muted);font-size:11px;}
+
   .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;}
   .section-title{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);font-family:var(--mono);}
 

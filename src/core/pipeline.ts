@@ -13,7 +13,9 @@ import {
   MAX_PIPELINE_ESCALATIONS,
 } from '../utils/config.js'
 import { extractCodeBlock, extractCodeFromToolCalls, wroteWorkbenchSlot } from '../utils/text.js'
-import { agentCanWriteSlot, slotOwner } from './agent.js'
+import { normalizeCompletion, invalidDecisionReason } from '../utils/terminal.js'
+import { isWithheldFromVerifier } from '../utils/adversarial.js'
+import { agentCanWriteSlot, slotOwner, agentRequiresAdversarialVerdict } from './agent.js'
 import {
   workbenchIdStorage, wbIdToConversationId,
   wbGet, wbSet, wbList, wbClear,
@@ -105,11 +107,15 @@ export async function executePipeline(
         // Role detection keys on ASSIGNEE only. The stage NAME is LLM-authored and
         // can be mislabeled (the decompose model has emitted the reviewer's stage as
         // "Testing" and the test stage as "Review"); a name-based check then handed
-        // test-execution instructions to the adversarial-reviewer, which has no exec
-        // tools, and it thrashed. Assignee is canonical after decompose's per-position
-        // correction, so it is the authoritative signal for what kind of stage this is.
+        // the wrong stage's instructions to the wrong agent and it thrashed.
+        // Assignee is canonical after decompose's per-position correction, so it is
+        // the authoritative signal for what kind of stage this is.
         const isReviewOrTestEarly = stage.assignee === 'adversarial-reviewer' || stage.assignee === 'test-engineer'
         const isTestStageEarly = stage.assignee === 'test-engineer'
+        // Adversarial-verifier withholding (item 11): the independent verifier's
+        // context must not name the team's test_report / test_harness slots, so it
+        // cannot anchor on the team's tests. Config-based (requiresAdversarialVerdict).
+        const isVerifierStage = agentRequiresAdversarialVerdict(stage.assignee)
         const rawFixSection = lastFix
           ? `\n\n## Fix Applied (attempt ${attempt})\n\n${lastFix.slice(0, 1200)}${lastFix.length > 1200 ? '\n[...truncated]' : ''}`
           : ''
@@ -119,7 +125,7 @@ export async function executePipeline(
 
         const isReviewOrTest = isReviewOrTestEarly
         const isTestStage    = isTestStageEarly
-        const wbSlots   = wbList().filter(s => !s.startsWith('__'))
+        const wbSlots   = wbList().filter(s => !s.startsWith('__') && (!isVerifierStage || !isWithheldFromVerifier(s)))
         const wbImpl    = wbGet('implementation')
         const wbNotice  = wbSlots.length
           ? `\n\n## Workbench\nAvailable slots: ${wbSlots.join(', ')}\n` +
@@ -152,7 +158,7 @@ export async function executePipeline(
             : previousOutput.slice(0, 600)
         }
 
-        const completion: StageCompletion = result.completion ?? (() => {
+        const rawCompletion: StageCompletion = result.completion ?? (() => {
           const parsed = parseHandoff(result.output)
           return {
             status:            parsed.status === 'escalate' ? 'ESCALATE' as const : 'DONE' as const,
@@ -160,16 +166,23 @@ export async function executePipeline(
             escalation_reason: parsed.status === 'escalate' ? parsed.reason : undefined,
           }
         })()
+        // Fail closed on a malformed completion status: anything that is not
+        // exactly DONE or ESCALATE is a broken terminal signal and is read as
+        // a self-contract ESCALATE (re-run this stage, bounded by maxRetries)
+        // rather than falling through as an implicit DONE.
+        const completion = normalizeCompletion(rawCompletion)
 
         callbacks.onStageDone(stage, result, completion.status === 'DONE' ? 'done' : 'escalate')
         allResults.push(result)
 
         // Self-contract failure: the agent ended without producing its OWN required
-        // slot or without executing (synthesized by the finalization gate). Routing
-        // this to escalateTo (e.g. senior-engineer) is wrong -- that agent often
-        // cannot even write this stage's slot (test_report is read-only to it), which
-        // produced the escalate/re-run churn. Re-run THIS stage with the feedback
-        // instead of summoning a fix agent or asking the coordinator to route.
+        // slot, without executing, or without calling complete_stage at all
+        // (synthesized by the finalization gate, reason no_terminal_signal).
+        // Routing this to escalateTo (e.g. senior-engineer) is wrong -- that agent
+        // often cannot even write this stage's slot (test_report is read-only to
+        // it), which produced the escalate/re-run churn. Re-run THIS stage with
+        // the feedback instead of summoning a fix agent or asking the coordinator
+        // to route.
         if (completion.status === 'ESCALATE' && completion.selfContract) {
           if (attempt >= maxRetries) {
             callbacks.onMaxRetries(stage)
@@ -301,6 +314,23 @@ export async function executePipeline(
           previousOutput = result.output
           stageIdx       = rewindIdx
           advanceIdx     = false
+          break
+        }
+
+        // Fail closed on an invalid state transition. At this point SYNTHESIZE
+        // has returned and NEXT / a valid REWIND have broken out of the stage
+        // loop, so the only well-formed decision that can still arrive is
+        // ESCALATE. An unknown action -- or a REWIND that carried no target --
+        // used to fall into the escalation code below (which had no action
+        // guard) and burn a fix cycle on a non-escalation. Surface it and stop
+        // retrying this stage: it advances with its current output, bounded
+        // and logged, instead of mis-routing or spinning.
+        const invalidReason = invalidDecisionReason(decision)
+        if (invalidReason) {
+          console.warn(`[pipeline] invalid coordinator decision for stage "${stage.name}" (${invalidReason}): ${JSON.stringify(decision)} -- failing closed (advancing without further retries)`)
+          callbacks.onMaxRetries(stage)
+          previousOutput = result.output
+          history.push({ name: stage.name, assignee: stage.assignee, summary: completion.summary })
           break
         }
 

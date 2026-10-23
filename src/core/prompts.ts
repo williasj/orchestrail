@@ -254,7 +254,47 @@ CLARIFY
    - "Build me a monitoring system" → CLARIFY (no stack, no scale, no targets)
    - "Create an API" → CLARIFY (no language, no purpose, no data model)
 
-Do not explain your reasoning. Do not produce JSON. Respond ONLY with one of: DIRECT: <answer>, PROCEED, or CLARIFY followed by numbered questions.`
+    Do not explain your reasoning. Do not produce JSON. Respond ONLY with one of: DIRECT: <answer>, PROCEED, or CLARIFY followed by numbered questions.`
+}
+
+/**
+ * Best-effort refine prompt for the consequential-ambiguity clarification
+ * (Issue 10, see utils/intake.ts + core/intake.ts). The code scaffold has already
+ * produced a bounded set of multiple-choice questions; the model only tightens
+ * phrasing and adds a few domain-specific options. It must preserve the JSON
+ * structure (dimension/header/question/options, each option with id/label) and
+ * return a JSON array only -- no prose, no fences. Output is validated and any
+ * malformed shape falls back to the scaffold, so this prompt is advisory, not
+ * load-bearing.
+ */
+export function clarificationRefinePrompt(): string {
+  return `You refine multiple-choice clarification questions for a build request. You are given a JSON object: { "goal": ..., "scaffold": [...] } where scaffold is an array of question objects.
+
+Return ONLY a JSON array of the SAME question objects, refined. Rules:
+- Keep the same number of questions and the same order. Never add or remove questions.
+- For each question keep the fields: dimension, header, question, options, multiple.
+- Tighten the "question" text to be specific to the goal. Keep it one sentence.
+- Keep each option's id and label; you may improve the label wording and add a short "description".
+- You may add up to TWO extra domain-specific options per question (each with a unique id and label). Do not remove the existing "Team's choice" escape option.
+- Keep "multiple" exactly as given.
+- Do not change dimension values. Do not add new fields.
+
+Respond with ONLY the JSON array. No prose, no code fences, no explanation.`
+}
+
+/**
+ * Focused prompt for the heuristic DIRECT fast-path (see utils/intake.ts). The
+ * goal has already been classified as a trivial question that needs no build,
+ * so the model only has to answer it -- no classification, no pipeline. Kept
+ * deliberately narrow so a direct answer never drifts into proposing work.
+ */
+export function defaultDirectAnswerPrompt(): string {
+  return `You are a direct-answer assistant. The request has already been classified as a trivial question that can be answered right now, without building anything.
+
+Answer directly and concisely in plain text. Do not write code, do not build anything, do not call tools, and do not ask clarifying questions.
+- For a calculation, give the result and a one-line working.
+- For a factual or explanatory question, give a clear, accurate answer in a few sentences (more only if the question genuinely requires it).
+- Never pad, and never propose to build or implement anything.`
 }
 
 export const DEFAULT_SYNTHESIS_PROMPT =

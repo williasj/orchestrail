@@ -16,9 +16,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8
 
 # -- System tooling, document/media converters, extra languages ---------------
+# bubblewrap (bwrap) provides per-run bash isolation: the run dir is the only
+# writable workspace, sibling run dirs are hidden, the wider FS and the shared
+# venv are read-only, and the sandbox runs in its own user namespace with all
+# capabilities dropped (so it cannot touch the iptables egress lockdown). On
+# Docker/TrueNAS the exec service needs security_opt: [apparmor:unconfined,
+# systempaths=unconfined, seccomp:unconfined]; no SYS_ADMIN cap is required.
+# The entrypoint self-tests bwrap at boot and refuses to start if it fails.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget gnupg \
-        iptables sudo \
+        iptables sudo bubblewrap \
         git zip unzip xz-utils bzip2 file tree less \
         jq sqlite3 ripgrep shellcheck bc \
         build-essential pkg-config cmake \
@@ -58,6 +65,8 @@ RUN for f in /etc/ImageMagick-6/policy.xml /etc/ImageMagick-7/policy.xml; do \
 
 WORKDIR /srv
 COPY server.mjs /srv/server.mjs
+COPY pathsafety.mjs /srv/pathsafety.mjs
+COPY isolation.mjs /srv/isolation.mjs
 COPY entrypoint.sh /srv/entrypoint.sh
 RUN chmod +x /srv/entrypoint.sh
 

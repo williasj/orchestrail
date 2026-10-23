@@ -76,6 +76,8 @@ export async function runSession(
   let napTurns = 0
   let handoffWritten = false
   let promptTokensPeak = 0
+  let promptTokensTotal = 0
+  let completionTokensTotal = 0
   let endReason: BTSessionRecord['end_reason'] = 'task_complete'
 
   while (turns < runtime.max_turns_per_session) {
@@ -90,11 +92,14 @@ export async function runSession(
 
     const usage = res.usage
     const promptTok = usage?.prompt_tokens ?? estimateTokens(messages.map(m => m.content ?? '').join('\n'))
-    promptTokensPeak = Math.max(promptTokensPeak, promptTok)
-    const ctxPct = (promptTok / runtime.num_ctx) * 100
-
     const choice = res.choices[0]
     const assistantMsg = choice?.message
+    const completionTok = usage?.completion_tokens ?? (assistantMsg?.content ? estimateTokens(assistantMsg.content) : 0)
+    promptTokensPeak = Math.max(promptTokensPeak, promptTok)
+    promptTokensTotal += promptTok
+    completionTokensTotal += completionTok
+    const ctxPct = (promptTok / runtime.num_ctx) * 100
+
     const calls = assistantMsg?.tool_calls ?? []
 
     messages.push({ role: 'assistant', content: assistantMsg?.content ?? null, tool_calls: calls.length ? calls : undefined })
@@ -148,6 +153,7 @@ export async function runSession(
       n: sessionNo, task: task.id, started_at: startedAt, ended_at: new Date().toISOString(),
       end_reason: endReason, turns, tool_calls: toolCalls,
       prompt_tokens_peak: promptTokensPeak, ctx_pct_peak: (promptTokensPeak / runtime.num_ctx) * 100,
+      prompt_tokens: promptTokensTotal, completion_tokens: completionTokensTotal,
       handoff_written: handoffWritten, commits: [], nap_turns: napTurns,
     }
   }
@@ -158,6 +164,7 @@ export async function runSession(
 function emptyRecord(n: number, task: string, startedAt: string, endReason: BTSessionRecord['end_reason']): BTSessionRecord {
   return {
     n, task, started_at: startedAt, ended_at: new Date().toISOString(), end_reason: endReason,
-    turns: 0, tool_calls: 0, prompt_tokens_peak: 0, ctx_pct_peak: 0, handoff_written: false, commits: [], nap_turns: 0,
+    turns: 0, tool_calls: 0, prompt_tokens_peak: 0, ctx_pct_peak: 0,
+    prompt_tokens: 0, completion_tokens: 0, handoff_written: false, commits: [], nap_turns: 0,
   }
 }

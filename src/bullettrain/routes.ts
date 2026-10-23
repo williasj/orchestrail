@@ -8,9 +8,12 @@ import { requireAuth } from '../routes/auth.js'
 import {
   listProjects, projectExists, createProject, readProject, writeProject,
   nextRunNo, createRun, statusExists, readStatus, readTasks, readDeliverableZip,
-  readDecisions, readProjectMd, readRuntime, listSessionRecords,
+  readDecisions, readProjectMd, writeProjectMd, readRuntime, listSessionRecords,
+  readProjectBudget, writeProjectBudget,
 } from './store.js'
 import { startSupervisorInBackground } from './supervisor.js'
+import { clarifyBrief, foldSelections } from './clarify.js'
+import { normalizeBudget } from './budget.js'
 import { BT_SLUG_RE } from './config.js'
 
 export function registerBulletTrainRoutes(app: Express): void {
@@ -36,12 +39,56 @@ export function registerBulletTrainRoutes(app: Express): void {
   app.get('/api/bullettrain/projects/:slug', requireAuth, (req: Request, res: Response) => {
     const project = readProject(req.params.slug!)
     if (!project) { res.status(404).json({ error: 'not found' }); return }
+    const projectMd = readProjectMd(project.slug)
     res.json({
       project,
-      projectMd: readProjectMd(project.slug),
+      projectMd,
       runtime: readRuntime(project.slug),
       decisions: readDecisions(project.slug),
+      clarification: clarifyBrief(projectMd),
+      budget: readProjectBudget(project.slug),
     })
+  })
+
+  // POST /api/bullettrain/projects/:slug/clarify  { answers: { "<idx>": optionId | freeText } }
+  // Folds the user's multi-choice selections into the project brief (PROJECT.md)
+  // and returns the clarified brief plus the re-detected clarification state.
+  // Advisory: it never blocks a run; the selections are folded against the
+  // questions recomputed server-side from the current brief (the client sends
+  // only selections by index, not the question set).
+  app.post('/api/bullettrain/projects/:slug/clarify', requireAuth, (req: Request, res: Response) => {
+    const slug = req.params.slug!
+    const project = readProject(slug)
+    if (!project) { res.status(404).json({ error: 'not found' }); return }
+    const { answers } = req.body as { answers?: Record<string, string> }
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+      res.status(400).json({ error: 'answers must be an object mapping question index to a selection' }); return
+    }
+
+    const brief = readProjectMd(slug)
+    const { questions } = clarifyBrief(brief)
+    const clarified = foldSelections(brief, questions, answers)
+    if (clarified === brief) {
+      res.status(400).json({ error: 'no selections to fold (pick at least one option or type an answer)' }); return
+    }
+    writeProjectMd(slug, clarified)
+    res.json({ clarifiedBrief: clarified, clarification: clarifyBrief(clarified) })
+  })
+
+  // POST /api/bullettrain/projects/:slug/budget  { budget: { tokens?, wallHours? } | null }
+  // Sets (or clears, when null / both omitted) the project's OPTIONAL cumulative
+  // token / wall-clock budget. Existing usage is preserved; only the cap changes.
+  app.post('/api/bullettrain/projects/:slug/budget', requireAuth, (req: Request, res: Response) => {
+    const slug = req.params.slug!
+    const project = readProject(slug)
+    if (!project) { res.status(404).json({ error: 'not found' }); return }
+
+    const normalized = normalizeBudget((req.body as { budget?: unknown })?.budget)
+    if (!normalized.ok) { res.status(400).json({ error: normalized.error }); return }
+
+    const current = readProjectBudget(slug)
+    writeProjectBudget(slug, { budget: normalized.budget, usage: current.usage })
+    res.json({ budget: { budget: normalized.budget, usage: current.usage } })
   })
 
   // POST /api/bullettrain/projects/:slug/runs  -- start a new run (new project or new stage)

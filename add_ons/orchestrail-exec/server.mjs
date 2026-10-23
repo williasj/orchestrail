@@ -17,10 +17,20 @@
 //     so the coordinator's normalizer keeps working unchanged).
 //
 // Security posture: this is the blast-radius floor (same role the Piston
-// sandbox played). Path traversal outside the run dir is rejected; every bash
-// command is forced into the run dir; RFC-1918 egress is dropped by iptables in
-// the entrypoint (internet still reachable for pip/npm installs). The container
-// is the boundary -- keep it dependency-free (node: builtins only).
+// sandbox played). Path traversal outside the run dir is rejected for the file
+// tools -- lexically AND through symlinks (see pathsafety.mjs); every bash
+// command is isolated per-run via bubblewrap (see isolation.mjs) so the run dir
+// is the only writable workspace, sibling run dirs are hidden, and the wider FS
+// is read-only; RFC-1918 egress is dropped by iptables in the entrypoint
+// (internet still reachable for pip/npm installs). The container is the
+// boundary -- keep it dependency-free (node: builtins only).
+//
+// NOTE: the bash tool's isolation is OS-level (Linux mount namespaces via
+// bubblewrap). The spec is computed by the pure leaf isolation.mjs (unit-tested
+// on any platform by isolation.check.mjs); the live bwrap invocation is thin
+// wiring in runBash below and is smoke-tested on the Linux deployment (Goldeye),
+// not the Windows dev box. If bwrap is absent the bash tool fails closed (no
+// silent fall back to an unconstrained shell).
 //
 // All source ASCII-only on purpose (on-disk / on-wire program text).
 
@@ -29,38 +39,34 @@ import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
+import { RUNID_RE, runDir, safePath } from './pathsafety.mjs'
+import { buildIsolationSpec, shellQuote } from './isolation.mjs'
 
 const PORT            = parseInt(process.env.EXEC_PORT || '8766', 10)
 const WORKBENCH_ROOT  = process.env.WORKBENCH_ROOT || '/workbench'
 const RUN_TIMEOUT_MS  = parseInt(process.env.RUN_TIMEOUT_MS || '60000', 10)
+// Explicit, loud opt-out of per-run bwrap isolation (EXEC_ISOLATION=off). Never a
+// silent fallback: the default is isolated and fail-closed.
+const ISOLATION_OFF   = (process.env.EXEC_ISOLATION || '').toLowerCase() === 'off'
+if (ISOLATION_OFF) console.warn(new Date().toISOString(), '[exec] WARNING: EXEC_ISOLATION=off -- bash runs WITHOUT per-run isolation')
 const MAX_OUTPUT_BYTES= parseInt(process.env.MAX_OUTPUT_BYTES || '1048576', 10) // 1 MiB per stream
 const MAX_BODY_BYTES  = parseInt(process.env.MAX_BODY_BYTES || '16777216', 10)  // 16 MiB request cap
-
-// runId must be a simple token: uuid, 'default', or similar. No separators that
-// could escape the workbench root. This is defense-in-depth on top of safePath.
-const RUNID_RE = /^[A-Za-z0-9_.-]{1,128}$/
+const DELIVER_EXTENSIONS = new Set(['.xlsx', '.zip', '.pdf', '.png'])
+const DELIVER_MIME = {
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.zip':  'application/zip',
+  '.pdf':  'application/pdf',
+  '.png':  'image/png',
+}
+const DELIVER_MAX_BYTES = parseInt(process.env.DELIVER_MAX_BYTES || String(50 * 1024 * 1024), 10)
 
 function log(...a) {
   console.log(new Date().toISOString(), '[exec]', ...a)
 }
 
 // -- Path safety ---------------------------------------------------------------
-
-function runDir(runId) {
-  return path.join(WORKBENCH_ROOT, runId)
-}
-
-// Resolve a caller-supplied path against the run dir and guarantee the result
-// stays inside it. Returns the absolute path or throws.
-function safePath(runId, userPath) {
-  const base = path.resolve(runDir(runId))
-  const rel  = (userPath === undefined || userPath === null) ? '.' : String(userPath)
-  const abs  = path.resolve(base, rel)
-  if (abs !== base && !abs.startsWith(base + path.sep)) {
-    throw new Error('path traversal blocked: ' + rel)
-  }
-  return abs
-}
+// runDir / safePath / RUNID_RE live in ./pathsafety.mjs -- symlink-safe and
+// unit-tested by exec.check.mjs.
 
 async function ensureRunDir(runId) {
   await fsp.mkdir(runDir(runId), { recursive: true })
@@ -71,18 +77,27 @@ async function ensureRunDir(runId) {
 function runBash(runId, command, stdin) {
   return new Promise((resolve) => {
     const dir = runDir(runId)
-    // Force every command into the run dir. Errors from a missing dir are
-    // pre-empted by ensureRunDir() in the dispatcher.
-    const wrapped = 'cd ' + shellQuote(dir) + ' && ( ' + command + ' )'
-    const child = spawn('/bin/bash', ['-lc', wrapped], {
+    // Per-run isolation: wrap the bash call in bubblewrap so the run dir is the
+    // only writable workspace, sibling run dirs are hidden, and the wider FS is
+    // read-only (see isolation.mjs). The spec is computed by a pure leaf; the
+    // bwrap invocation is Linux-only (smoke-tested on the deployment). If bwrap
+    // is absent, spawn errors and the 'error' handler below fails closed (no
+    // silent fall back to an unconstrained shell).
+    const spec = ISOLATION_OFF ? {
+      wrapper: '/bin/bash',
+      argv: ['-lc', 'cd ' + shellQuote(dir) + ' && ( ' + command + ' )'],
+      env: { ...process.env, HOME: dir, RUN_ID: runId },
       cwd: dir,
-      env: {
-        ...process.env,
-        HOME: dir,
-        RUN_ID: runId,
-        PIP_CACHE_DIR: process.env.PIP_CACHE_DIR || '/cache/pip',
-        npm_config_cache: process.env.npm_config_cache || '/cache/npm',
-      },
+    } : buildIsolationSpec({
+      runId,
+      runDir: dir,
+      workbenchRoot: WORKBENCH_ROOT,
+      command,
+      env: process.env,
+    })
+    const child = spawn(spec.wrapper, spec.argv, {
+      cwd: spec.cwd,
+      env: spec.env,
     })
 
     let out = Buffer.alloc(0)
@@ -94,6 +109,14 @@ function runBash(runId, command, stdin) {
     const timer = setTimeout(() => {
       if (settled) return
       try { child.kill('SIGKILL') } catch {}
+      // Never let a timeout hang the request: if 'close' has not fired shortly
+      // after the kill (a descendant still holds the pipes), resolve anyway.
+      setTimeout(() => {
+        if (settled) return
+        settled = true
+        try { child.stdout.destroy(); child.stderr.destroy() } catch {}
+        resolve({ stdout: out.toString('utf8'), stderr: err.toString('utf8') + '\nkilled: timeout after ' + RUN_TIMEOUT_MS + ' ms', exit_code: 137 })
+      }, 3000)
     }, RUN_TIMEOUT_MS)
 
     child.stdout.on('data', (c) => {
@@ -129,10 +152,6 @@ function runBash(runId, command, stdin) {
     if (stdin && stdin.length) child.stdin.write(stdin)
     child.stdin.end()
   })
-}
-
-function shellQuote(s) {
-  return "'" + String(s).replace(/'/g, "'\\''") + "'"
 }
 
 async function writeFile(runId, p, content) {
@@ -306,6 +325,34 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/runtimes') {
       const runtimes = await detectRuntimes()
       return sendJson(res, 200, { result: runtimes })
+    }
+    if (req.method === 'GET' && req.url && req.url.startsWith('/deliver')) {
+      const u = new URL(req.url, 'http://localhost')
+      const runId  = u.searchParams.get('runId') ?? ''
+      const relPath = u.searchParams.get('path')  ?? ''
+      if (!RUNID_RE.test(runId)) return sendJson(res, 400, { error: 'invalid or missing runId' })
+      if (!relPath)              return sendJson(res, 400, { error: 'path is required' })
+      const ext = path.extname(relPath).toLowerCase()
+      if (!DELIVER_EXTENSIONS.has(ext)) return sendJson(res, 400, { error: 'file type not allowed: ' + ext })
+      let abs
+      try { abs = safePath(runId, relPath) } catch (e) { return sendJson(res, 400, { error: e.message }) }
+      try {
+        const stat = fs.statSync(abs)
+        if (!stat.isFile()) return sendJson(res, 404, { error: 'not a file: ' + relPath })
+        if (stat.size > DELIVER_MAX_BYTES) return sendJson(res, 413, { error: 'file too large: ' + stat.size + ' bytes (max ' + DELIVER_MAX_BYTES + ')' })
+        const mime = DELIVER_MIME[ext] || 'application/octet-stream'
+        const basename = path.basename(relPath)
+        res.writeHead(200, {
+          'Content-Type': mime,
+          'Content-Length': stat.size,
+          'Content-Disposition': 'attachment; filename="' + basename + '"',
+        })
+        fs.createReadStream(abs).pipe(res)
+        return
+      } catch (e) {
+        if (e.code === 'ENOENT') return sendJson(res, 404, { error: 'file not found: ' + relPath })
+        return sendJson(res, 500, { error: e.message })
+      }
     }
     if (req.method === 'POST' && (req.url === '/' || req.url === '')) {
       let payload

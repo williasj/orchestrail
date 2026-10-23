@@ -63,6 +63,35 @@ export async function btListFiles(runId: string, subpath?: string): Promise<BTEx
   return btExecPost('list_files', runId, subpath !== undefined ? { path: subpath } : {})
 }
 
+// Result of fetching a file over the sidecar's GET /deliver endpoint. Never
+// throws -- transport/HTTP outcomes are encoded in the fields so the caller can
+// interpret them (see decidePackaging in zip.ts).
+export interface BTDeliverResult {
+  status: number | null   // HTTP status; null when the fetch threw (transport error)
+  buffer: Buffer | null   // response body, only when status === 200
+  errorBody?: string      // response body text, when status is non-2xx
+  error?: string          // transport-level error message, when the fetch threw
+}
+
+// Fetch a file from the run's workbench over the sidecar's GET /deliver endpoint
+// (raw bytes, up to the sidecar's DELIVER_MAX_BYTES cap). Reused for BulletTrain
+// deliverable packaging so a large workbench zip is streamed whole instead of
+// being silently truncated by the bash stdout cap (see zip.ts).
+export async function btDeliverFile(runId: string, relPath: string, timeoutMs = 300_000): Promise<BTDeliverResult> {
+  if (!BT_EXEC_URL) return { status: null, buffer: null, error: 'no exec endpoint registered (set CODE_EXEC_URL or BT_EXEC_URL)' }
+  const base = BT_EXEC_URL.replace(/\/$/, '')
+  const url = `${base}/deliver?runId=${encodeURIComponent(runId)}&path=${encodeURIComponent(relPath)}`
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    if (res.ok) {
+      return { status: res.status, buffer: Buffer.from(await res.arrayBuffer()) }
+    }
+    return { status: res.status, buffer: null, errorBody: (await res.text()).slice(0, 300) }
+  } catch (err) {
+    return { status: null, buffer: null, error: String(err) }
+  }
+}
+
 /** Health check -- used to distinguish exec_unreachable from a bad command. */
 export async function btExecHealthy(): Promise<boolean> {
   if (!BT_EXEC_URL) return false

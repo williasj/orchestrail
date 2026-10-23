@@ -9,6 +9,19 @@ import {
 import {
   stripThinkBlocks, extractCodeBlock, extractCodeFromToolCalls, ensurePyFutureAnnotations,
 } from '../utils/text.js'
+import { noTerminalSignalCompletion } from '../utils/terminal.js'
+import { compactMessages } from '../utils/compact.js'
+import {
+  ENTRY_POINT_PROBE_SLOT, entryPointProbeRequired, evaluateEntryPointProbe,
+} from '../utils/verify.js'
+import {
+  MUTATION_DEFAULTS, generateMutants, classifyMutantOutcome,
+  interpretMutationResults, evaluateMutationProbe, mutationMode,
+  type MutantResult, type MutationVerdict,
+} from '../utils/mutation.js'
+import {
+  ADVERSARIAL_VERDICT_SLOT, evaluateAdversarialVerdict, adversarialVerdictRequired,
+} from '../utils/adversarial.js'
 import { wbGet, wbSet } from './workbench.js'
 import { defaultLLM } from './persistence.js'
 import { callLLMRaw, buildFlagPrefix, usageStorage } from './llm.js'
@@ -16,9 +29,9 @@ import {
   buildCompleteStageTool, COMPLETE_STAGE_FN, COMPLETE_STAGE_URL,
 } from './prompts.js'
 import {
-  fetchAgentTools, executeToolCall, appendToolLog,
+  fetchAgentTools, executeToolCall, appendToolLog, runCodeViaTool, stripRedundantImplImports,
 } from './tools.js'
-import { recallSkillCaps } from './skillexec.js'
+import { recallSkillCaps, runSkill } from './skillexec.js'
 import { recallFailures } from './ragspecs.js'
 import type { TeamAgent, TaskSpec, AgentResult, StageCompletion, AgenticMessage } from '../types/index.js'
 
@@ -45,6 +58,12 @@ export function agentCanWriteSlot(agentName: string, slot: string): boolean {
 }
 export function slotOwner(slot: string): string | null {
   return (_deps?.getAgents() ?? []).find(a => (a.requiredOutputSlots ?? []).includes(slot))?.name ?? null
+}
+/** True when the agent is the independent adversarial verifier (item 11): the
+ *  team's test_report / test_harness are withheld from it and its DONE requires
+ *  a zero-failure adversarial verdict. Config-based (no role strings). */
+export function agentRequiresAdversarialVerdict(assignee: string): boolean {
+  return agentMap().get(assignee)?.requiresAdversarialVerdict ?? false
 }
 
 // -- Generation counter --------------------------------------------------------
@@ -239,6 +258,7 @@ function finalizationEscalation(
   executionAttempted: boolean,
   executionPassed:    boolean,
   lastExecutionDetail: string,
+  mutationVerdict:    MutationVerdict | null,
 ): string | null {
   const reasons: string[] = []
 
@@ -251,6 +271,7 @@ function finalizationEscalation(
   const required = (agent?.requiredOutputSlots ?? [])
     .filter(s => s !== 'runtimes')
     .filter(s => s !== 'test_harness' || isCodeTask)
+    .filter(s => s !== ADVERSARIAL_VERDICT_SLOT || isCodeTask)
   const missing  = required.filter(s => !wbGet(s))
   if (missing.length > 0) {
     reasons.push(`Required output slot(s) not written: ${missing.join(', ')} -- call workbench_write for each before completing.`)
@@ -266,15 +287,57 @@ function finalizationEscalation(
     }
   }
 
+  // Entry-point probe (item 7 / C1 / A1): the unit-test execution gate above is
+  // NECESSARY but not SUFFICIENT -- it proves the library functions pass the
+  // team's own tests, not that the artifact works the way the requester will use
+  // it. For a code task the test-engineer must also drive the real entry point
+  // end-to-end (CLI / demo / __main__ / public API) and record a passing probe
+  // covering at least one boundary. The verdict is computed by the pure contract
+  // in utils/verify.ts so the gate never trusts model prose.
+  const probeVerdict = evaluateEntryPointProbe(
+    wbGet(ENTRY_POINT_PROBE_SLOT),
+    entryPointProbeRequired(isCodeTask, !!agent?.requiresVerifiedExecution),
+  )
+  if (!probeVerdict.satisfied) reasons.push(probeVerdict.reason)
+
+  // Mutation-robustness probe (item 8): the suite passed but a valid mutant survived
+  // -- the tests pass on subtly-wrong code. Only contributes a reason when the probe
+  // actually ran (mutationVerdict non-null) and found survivors.
+  if (mutationVerdict && !mutationVerdict.satisfied && mutationMode() === 'block') reasons.push(mutationVerdict.reason)
+
+  // Adversarial verdict (item 11): the independent verifier's OWN probes must have
+  // been run for real and must show ZERO failures. The team's test_report /
+  // test_harness are withheld from this agent, so the verdict is independent work,
+  // not a rubber-stamp of the team's suite. Verdict from the pure contract in
+  // utils/adversarial.ts; the gate never trusts model prose.
+  if (agent?.requiresAdversarialVerdict && isCodeTask) {
+    if (!executionAttempted) {
+      reasons.push('You marked this stage complete without executing any probes. Run each adversarial probe for real -- '
+        + 'write_file + bash, or use_skill(python-run-tests) with your own test_code -- and record the observed result '
+        + 'in the adversarial_verdict slot before completing.')
+    }
+    const advVerdict = evaluateAdversarialVerdict(
+      wbGet(ADVERSARIAL_VERDICT_SLOT),
+      adversarialVerdictRequired(isCodeTask, true),
+    )
+    if (!advVerdict.satisfied) reasons.push(advVerdict.reason)
+  }
+
   return reasons.length ? reasons.join(' ') : null
 }
 
-// Build a synthesized ESCALATE completion for a pipeline stage that ended WITHOUT
-// calling complete_stage. Returns undefined when the stage is not a pipeline stage
-// or when all finalization checks pass -- in which case the caller falls back to the
-// existing behavior (pipeline defaults a missing completion to DONE). This is the
-// piece that closes the bypass: the intelligence lives here, where executionAttempted/
-// executionPassed are known, rather than in pipeline.ts which cannot see them.
+// Build the completion for a pipeline stage that ended WITHOUT calling
+// complete_stage. A missing terminal signal is ALWAYS an ESCALATE (reason
+// no_terminal_signal) -- even when the finalization checks below pass. The
+// old behavior returned undefined when the checks passed, letting pipeline.ts
+// default the missing completion to DONE and advance the stage silently (the
+// "silent quality leak"): a stage that never signalled completion was treated
+// as complete. Returns undefined only for non-pipeline stages (DAG mode),
+// which have no complete_stage tool and no terminal-signal contract. The
+// finalization checks still contribute their concrete reasons (missing slot /
+// unverified execution) when they fail. The intelligence lives here, where
+// executionAttempted/executionPassed are known, rather than in pipeline.ts
+// which cannot see them.
 function finalizeBypass(
   agent:              TeamAgent | undefined,
   isPipelineStage:    boolean,
@@ -282,17 +345,13 @@ function finalizeBypass(
   executionAttempted: boolean,
   executionPassed:    boolean,
   lastExecutionDetail: string,
+  mutationVerdict:    MutationVerdict | null,
 ): StageCompletion | undefined {
   if (!isPipelineStage) return undefined
-  const reason = finalizationEscalation(agent, executionAttempted, executionPassed, lastExecutionDetail)
-  if (!reason) return undefined
-  console.log(`[finalize] ${assignee} ended without complete_stage -> ESCALATE (${reason.slice(0, 80)})`)
-  return {
-    status:            'ESCALATE',
-    summary:           '(stage ended without calling complete_stage)',
-    escalation_reason: reason,
-    selfContract:      true,
-  }
+  const finalReason = finalizationEscalation(agent, executionAttempted, executionPassed, lastExecutionDetail, mutationVerdict)
+  const completion  = noTerminalSignalCompletion(finalReason)
+  console.log(`[finalize] ${assignee} ended without complete_stage -> ESCALATE (${(completion.escalation_reason ?? '').slice(0, 80)})`)
+  return completion
 }
 
 // Public entry point. Wraps the agent run to capture its token usage as the
@@ -301,15 +360,18 @@ function finalizeBypass(
 // OUTSIDE runAgent), so the delta is attributable to this agent alone. Concurrent
 // DAG fan-out within one request would smear attribution -- accurate for the
 // sequential pipeline path, which is what the footer reports against.
-export async function runAgent(spec: TaskSpec, generation: number): Promise<AgentResult> {
+export async function runAgent(spec: TaskSpec, generation: number, reasoningEffort?: string): Promise<AgentResult> {
   const before = usageStorage.getStore()?.total_tokens ?? 0
-  const result = await runAgentInner(spec, generation)
+  const t0 = Date.now()
+  const result = await runAgentInner(spec, generation, reasoningEffort)
   const after  = usageStorage.getStore()?.total_tokens ?? 0
   const delta  = Math.max(0, after - before)
-  return delta > 0 ? { ...result, tokens: delta } : result
+  const durationMs = Date.now() - t0
+  const withTokens = delta > 0 ? { ...result, tokens: delta } : result
+  return { ...withTokens, durationMs }
 }
 
-async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentResult> {
+async function runAgentInner(spec: TaskSpec, generation: number, reasoningEffort?: string): Promise<AgentResult> {
   const agent            = agentMap().get(spec.assignee)
   const baseSystemPrompt = buildFlagPrefix() + (agent?.systemPrompt ?? `You are a ${spec.assignee} specialist.`)
 
@@ -329,6 +391,13 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
   const llm          = agent?.llm ?? defaultLLM()
   const temperature  = agent?.temperature ?? 0
   const maxTokens    = agent?.maxTokens ?? 4096
+
+  // Cheap mode (item 17 / B3): when the caller requests a lower reasoning effort,
+  // forward it to the LLM as reasoning_effort -- but ONLY to local/custom providers
+  // (Ollama's OpenAI endpoint honours it; OpenAI/Anthropic reject unknown fields).
+  // Mirrors the coordinator's reasoning_effort:'none' gating (llm.ts callCoordinatorLLM).
+  const localProvider  = llm.provider !== 'anthropic' && llm.provider !== 'openai'
+  const reasoningExtra = (reasoningEffort && localProvider) ? { reasoning_effort: reasoningEffort } : undefined
 
   // Pipeline stages include HANDOFF_FOOTER in their task description.
   // For these stages inject the complete_stage tool as a required termination signal.
@@ -472,6 +541,12 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
     // the persisted internal slot so it survives across stage retries.
     let capturedTestCode = wbGet(HARNESS_SLOT) ?? ''
 
+    // Mutation-probe verdict, set by attemptMutationProbe(). null until the probe
+    // runs (and it only runs on a passing code stage with a captured harness). The
+    // complete_stage gate and finalizationEscalation read this to downgrade a DONE
+    // when a valid mutant survived the suite -- the tests pass on subtly-wrong code.
+    let mutationProbeVerdict: MutationVerdict | null = null
+
     // Deterministic verification: when a requiresVerifiedExecution code stage has
     // not produced a passing run, the orchestrator runs python-run-tests ITSELF
     // against the current implementation slot plus the captured harness -- instead
@@ -512,6 +587,77 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
         args: { name: 'python-run-tests', orchestratorVerified: true },
         result: res, ok: !skillHardErrored(res), durationMs: 0,
       })
+    }
+
+    // Mutation-robustness probe (frontier item 8). attemptDeterministicVerification
+    // proves the suite PASSES; this asks whether it is STRONG enough. When a
+    // requiresVerifiedExecution code stage has a passing run AND a captured harness,
+    // the orchestrator generates single-line mutants of the implementation, runs the
+    // harness against each (via runSkill directly, with record:false so probe traffic
+    // does not pollute python-run-tests' skill stats), and classifies each as killed /
+    // survived / invalid. A suite that survives valid mutants passes on subtly-wrong
+    // code -- the verdict is recorded so the gate can downgrade a DONE. Idempotent and
+    // cheap: capped at MUTATION_DEFAULTS.maxMutants, a no-op when prerequisites are
+    // missing, and it never runs against a failing suite (that already escalates).
+    let mutationProbeKey = ''
+    async function attemptMutationProbe(): Promise<void> {
+      if (mutationMode() === 'off') return
+      if (!executionPassed) return
+      if (!agent?.requiresVerifiedExecution || !wbGet('runtimes')) return
+      const harness  = (capturedTestCode || wbGet(HARNESS_SLOT) || wbGet('test_harness') || '').trim()
+      const implCode = (wbGet(agent.injectCodeFromSlot ?? 'implementation') || '').trim()
+      if (!harness || !implCode) return
+      // Replicate the use_skill auto-repair so the harness resolves in-namespace
+      // regardless of the module name the model guessed. The symbol set is unchanged
+      // by a mutation (operators/literals only), so strip once from the original impl.
+      // Run once per (implementation, harness) pair: complete_stage can be called
+      // several times in a stage and each probe is up to maxMutants sandbox runs.
+      const probeKey = String(implCode.length) + ':' + String(harness.length) + ':' + implCode.slice(-200) + harness.slice(-200)
+      if (probeKey === mutationProbeKey) return
+      mutationProbeKey = probeKey
+      const stripped = stripRedundantImplImports(implCode, harness)
+      const mutants  = generateMutants(implCode, MUTATION_DEFAULTS.maxMutants)
+      if (mutants.length === 0) {
+        mutationProbeVerdict = evaluateMutationProbe(null, true)
+        return
+      }
+      console.log(`[mutation] ${spec.assignee}: probing suite strength against ${mutants.length} mutants`)
+      const results: MutantResult[] = []
+      for (const mutant of mutants) {
+        let outcome: MutantResult['outcome'] = 'invalid'
+        let ran = 0, failed = 0, errored = 0
+        let error: string | null = null
+        try {
+          const res = await runSkill(
+            'python-run-tests',
+            { code: ensurePyFutureAnnotations(mutant.code), test_code: stripped },
+            runCodeViaTool,
+            { record: false },
+          )
+          const r = (res.result ?? {}) as { ran?: number; failed?: number; errored?: number; error?: unknown }
+          ran     = typeof r.ran === 'number' ? r.ran : 0
+          failed  = typeof r.failed === 'number' ? r.failed : 0
+          errored = typeof r.errored === 'number' ? r.errored : 0
+          error   = r.error ? String(r.error) : (res.error ? String(res.error) : null)
+          outcome = classifyMutantOutcome({ ok: res.ok, ran, failed, errored, error })
+        } catch {
+          outcome = 'invalid'
+          error   = 'mutation run failed'
+        }
+        results.push({ mutant, outcome, ran, failed, errored, error })
+      }
+      const result = interpretMutationResults(results)
+      mutationProbeVerdict = evaluateMutationProbe(result, true)
+      const valid = result.killed + result.survived
+      const rate  = valid ? Math.round(100 * result.killed / valid) : -1
+      console.log(`[mutation] ${spec.assignee}: killed ${result.killed}/${valid} valid (invalid ${result.invalid}) kill-rate ${rate}% mode=${mutationMode()}`)
+      try {
+        wbSet('__mutation_probe', JSON.stringify({ mode: mutationMode(), killed: result.killed, survived: result.survived, invalid: result.invalid, killRate: rate,
+          survivors: result.mutants.filter(m => m.outcome === 'survived').map(m => ({ op: m.mutant.operator, line: m.mutant.line, mutated: m.mutant.mutated.trim() })) }))
+      } catch { /* advisory record only */ }
+      if (!mutationProbeVerdict.satisfied) {
+        console.log(`[mutation] ${spec.assignee}: suite not robust -- ${mutationProbeVerdict.reason.slice(0, 160)}`)
+      }
     }
 
     // Focused verification re-ask. attemptDeterministicVerification can only run when a
@@ -560,7 +706,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
 
       let resp
       try {
-        resp = await callLLMRaw(reaskMessages, llm, maxTokens, temperature, [useSkillDef], `orchestrail/${spec.assignee}`)
+        resp = await callLLMRaw(reaskMessages, llm, maxTokens, temperature, [useSkillDef], `orchestrail/${spec.assignee}`, reasoningExtra)
       } catch (err) {
         console.warn(`[verify-reask] ${spec.assignee}: re-ask LLM call failed: ${err instanceof Error ? err.message : String(err)}`)
         return
@@ -592,16 +738,26 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
         return { assignee: spec.assignee, title: spec.title, output: '(aborted)', success: false }
       }
 
+      // Within-stage rolling compaction (item 6, Half B): once the transcript
+      // grows past the threshold, fold the older tool rounds into a short summary
+      // so the context re-sent on this LLM call stays bounded. Read-only: the full
+      // `messages` array is kept intact for the returned _messages and for
+      // extractCodeFromToolCalls; only the LLM sees the compacted view.
+      // Off by default (COMPACT_TRANSCRIPT=1 enables): rewriting the middle of the
+      // transcript every call defeats vLLM/Ollama prefix caching, so on local
+      // backends it usually costs more prefill time than it saves.
+      const llmMessages = process.env.COMPACT_TRANSCRIPT === '1' ? compactMessages(messages) : messages
+
       let response: Awaited<ReturnType<typeof callLLMRaw>>
       try {
-        response = await callLLMRaw(messages, llm, maxTokens, temperature, toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`)
+        response = await callLLMRaw(llmMessages, llm, maxTokens, temperature, toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`, reasoningExtra)
       } catch (e) {
         // A server-side 5xx is usually Ollama failing to parse a malformed tool call
         // the model emitted ("tool call parsing failed: EOF"). One retry samples a
         // different completion; a second failure propagates as before.
         if (!/LLM error: 5\d\d/.test(String(e))) throw e
         console.warn(`[agent] ${spec.assignee}: LLM ${String(e).slice(0, 120)} -- retrying once`)
-        response = await callLLMRaw(messages, llm, maxTokens, Math.max(temperature, 0.6), toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`)
+        response = await callLLMRaw(llmMessages, llm, maxTokens, Math.max(temperature, 0.6), toolDefs.length ? toolDefs : undefined, `orchestrail/${spec.assignee}`, reasoningExtra)
       }
       const choice   = response.choices[0]
       if (!choice) break
@@ -617,6 +773,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
         if (!pipelineCompletion) {
           await attemptVerificationReask()
           await attemptDeterministicVerification()
+          await attemptMutationProbe()
         }
         return {
           assignee:   spec.assignee,
@@ -624,7 +781,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
           output:     stripThinkBlocks(content ?? ''),
           success:    true,
           completion: pipelineCompletion
-            ?? finalizeBypass(agent, isPipelineStage, spec.assignee, executionAttempted, executionPassed, lastExecutionDetail),
+            ?? finalizeBypass(agent, isPipelineStage, spec.assignee, executionAttempted, executionPassed, lastExecutionDetail, mutationProbeVerdict),
           verification: mkVerification(),
           _messages:  messages,
         }
@@ -641,11 +798,13 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
           // complete_stage is the pipeline termination tool -- handle inline
           if (tc.function.name === COMPLETE_STAGE_FN) {
             // Enforce required output slots before accepting complete_stage.
-            // test_harness is code-only (see finalizationEscalation): exempt it on
-            // non-code stages so a non-code artifact is not blocked on a harness.
+            // test_harness and adversarial_verdict are code-only (see
+            // finalizationEscalation): exempt them on non-code stages so a non-code
+            // artifact is not blocked on a harness or a verdict.
             const isCodeTask    = !!wbGet('runtimes')
             const requiredSlots = (agent?.requiredOutputSlots ?? [])
               .filter(slot => slot !== 'test_harness' || isCodeTask)
+              .filter(slot => slot !== ADVERSARIAL_VERDICT_SLOT || isCodeTask)
             const missingSlots  = requiredSlots.filter(slot => !wbGet(slot))
             if (missingSlots.length > 0) {
               const msg = `BLOCKED: complete_stage rejected. You must call workbench_write for the following slots before completing: ${missingSlots.join(', ')}. Write them now, then call complete_stage again.`
@@ -672,6 +831,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
             // explicit ESCALATE -- only the gate below may downgrade a DONE.
             reconcileTestReport()
             await attemptDeterministicVerification()
+            await attemptMutationProbe()
 
             // Outcome-based verification gate (capability-agnostic). When an agent is
             // flagged requiresVerifiedExecution AND this is a CODE task (architect
@@ -701,6 +861,47 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
                   + 'A later run that leaves them out does not count. Either the implementation is wrong (fix it and re-run '
                   + 'the FULL suite) or the test was wrong (correct it and re-run it so it passes).'
                 console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (unresolved failing tests: ${names})`)
+              } else {
+                // Entry-point probe (item 7 / C1 / A1): the execution gate above is
+                // necessary but not sufficient. The artifact must ALSO be driven
+                // end-to-end the way the requester will use it, with at least one
+                // boundary covered. Verdict from the pure contract in utils/verify.ts.
+                const probe = evaluateEntryPointProbe(wbGet(ENTRY_POINT_PROBE_SLOT), true)
+                if (!probe.satisfied) {
+                  completionStatus = 'ESCALATE'
+                  escalationReason = probe.reason
+                  console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (entry-point probe not satisfied)`)
+                } else if (mutationProbeVerdict && !mutationProbeVerdict.satisfied && mutationMode() === 'block') {
+                  // Mutation-robustness probe (item 8): the suite passed and the entry
+                  // point was driven, but a valid mutant survived -- the tests pass on
+                  // subtly-wrong code. Downgrade DONE so the test-engineer strengthens
+                  // the suite. Verdict from the pure contract in utils/mutation.ts.
+                  completionStatus = 'ESCALATE'
+                  escalationReason = mutationProbeVerdict.reason
+                  console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (mutation probe: suite not robust)`)
+                }
+              }
+            }
+
+            // Adversarial verdict (item 11): the independent verifier's DONE requires
+            // its OWN probes to have been run for real and to show ZERO failures. The
+            // team's test_report / test_harness are withheld from this agent, so the
+            // verdict is independent work, not a rubber-stamp of the team's suite.
+            // Verdict from the pure contract in utils/adversarial.ts.
+            if (completionStatus === 'DONE' && agent?.requiresAdversarialVerdict && wbGet('runtimes')) {
+              if (!executionAttempted) {
+                completionStatus = 'ESCALATE'
+                escalationReason = 'You marked this stage DONE without executing any probes. Run each adversarial probe for real -- '
+                  + 'write_file + bash, or use_skill(python-run-tests) with your own test_code -- and record the observed '
+                  + 'result in the adversarial_verdict slot before completing.'
+                console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (no adversarial probes executed)`)
+              } else {
+                const adv = evaluateAdversarialVerdict(wbGet(ADVERSARIAL_VERDICT_SLOT), true)
+                if (!adv.satisfied) {
+                  completionStatus = 'ESCALATE'
+                  escalationReason = adv.reason
+                  console.log(`[complete_stage] ${spec.assignee} DONE -> ESCALATE (adversarial verdict not satisfied)`)
+                }
               }
             }
 
@@ -846,6 +1047,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
     if (!pipelineCompletion) {
       await attemptVerificationReask()
       await attemptDeterministicVerification()
+      await attemptMutationProbe()
     }
     return {
       assignee:   spec.assignee,
@@ -853,7 +1055,7 @@ async function runAgentInner(spec: TaskSpec, generation: number): Promise<AgentR
       output:     stripThinkBlocks(lastAssistant?.content ?? ''),
       success:    true,
       completion: pipelineCompletion
-        ?? finalizeBypass(agent, isPipelineStage, spec.assignee, executionAttempted, executionPassed, lastExecutionDetail),
+        ?? finalizeBypass(agent, isPipelineStage, spec.assignee, executionAttempted, executionPassed, lastExecutionDetail, mutationProbeVerdict),
       verification: mkVerification(),
       _messages:  messages,
     }

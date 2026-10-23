@@ -21,7 +21,11 @@ Rules:
   the task is genuinely done and non-zero otherwise. Prefer real checks (running
   a test file, checking a process starts, curling an endpoint) over trivial
   existence checks. Use the literal string "manual" only when no command can
-  verify it (e.g. "write documentation").
+  verify it (e.g. "write documentation"). Where practical, have the verify
+  command print one line per check it performs, in the form
+  "VERIFY <name> PASS" or "VERIFY <name> FAIL" (or SKIP), so the run report can
+  show which checks ran; the exit code still decides pass/fail, so these lines
+  are advisory detail, not required.
 - Order tasks so that a task's dependencies come before it. List dependency
   task numbers (1-based, referring to this array's order) in "depends".
 - Do not pad the list with busywork tasks. Do not skip steps a working

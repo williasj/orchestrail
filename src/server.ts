@@ -2,7 +2,8 @@ import express, { Request, Response } from 'express'
 import cors from 'cors'
 import { OLLAMA_BASE_URL, OLLAMA_MODEL } from './agents.js'
 import { UI_HTML } from './ui.js'
-import { PORT, MODEL_ID, PIPELINES_API_KEY, cols, RAG_DIR } from './utils/config.js'
+import { PORT, MODEL_ID, PIPELINES_API_KEY, PIPELINES_API_KEY_DEFAULT, cols, RAG_DIR } from './utils/config.js'
+import { maskSecret } from './utils/secrets.js'
 import {
   initMemory, qdrantEnsureCollection,
   rehydrateWorkbench, analyzeAndStoreToolingPatterns,
@@ -46,6 +47,7 @@ import { recoverStrandedRuns }       from './bullettrain/supervisor.js'
 import { registerSkillRoutes }       from './routes/skills.js'
 import { registerWikiRoutes }        from './routes/wiki.js'
 import { registerDirectRoutes }      from './routes/direct.js'
+import { registerDeliverRoutes }     from './routes/deliver.js'
 import { initUsers }                 from './core/users.js'
 import type { TeamAgent, ToolConfig, CoordinatorConfig } from './types/index.js'
 
@@ -166,6 +168,7 @@ recoverStrandedRuns()
 registerSkillRoutes(app, { exec: runCodeViaTool })
 registerWikiRoutes(app)
 registerDirectRoutes(app, { getCoordinator: () => COORDINATOR, getTools: () => TOOLS })
+registerDeliverRoutes(app)
 
 // -- Start ---------------------------------------------------------------------
 
@@ -175,7 +178,13 @@ app.listen(PORT, async () => {
   console.log('Coordinator        -- ' + COORDINATOR.llm.model + ' @ ' + COORDINATOR.llm.url)
   console.log('Agents             -- ' + AGENTS.map(a => a.name).join(', '))
   console.log('WebUI              -- http://localhost:' + PORT + '/ui')
-  console.log('Pipelines URL      -- http://localhost:' + PORT + '  (key: ' + PIPELINES_API_KEY + ')')
+  // Never print the raw key. A real key is masked (trailing chars only); the
+  // well-known insecure default is called out loudly so it gets fixed.
+  if (PIPELINES_API_KEY === PIPELINES_API_KEY_DEFAULT) {
+    console.warn('Pipelines URL      -- http://localhost:' + PORT + '  (key: ' + PIPELINES_API_KEY_DEFAULT + ' [INSECURE DEFAULT — set PIPELINES_API_KEY to a strong value])')
+  } else {
+    console.log('Pipelines URL      -- http://localhost:' + PORT + '  (key: ' + maskSecret(PIPELINES_API_KEY) + ')')
+  }
 
   for (const a of AGENTS) {
     if (a.readOnlySlots === undefined) {

@@ -12,6 +12,7 @@ import {
   BT_DEFAULT_RUNTIME,
 } from './config.js'
 import { renderRuntimeMd, parseRuntimeMd } from './runtime.js'
+import type { BTBudgetState } from './budget.js'
 import type { BTProject, BTStatus, BTTask, BTTaskMark, BTRuntime, BTSessionRecord } from './types.js'
 
 // -- Paths -----------------------------------------------------------------------
@@ -36,6 +37,7 @@ function verifyDir(slug: string, runNo: string): string { return path.join(runDi
 export function deliverableZipPath(slug: string, runNo: string): string {
   return path.join(runDir(slug, runNo), 'deliverable.zip')
 }
+function budgetJsonPath(slug: string): string { return path.join(projectDir(slug), 'budget.json') }
 
 // -- Atomic write ------------------------------------------------------------------
 
@@ -95,6 +97,10 @@ export function createProject(slug: string, title: string, briefContent: string,
 
 export function readProjectMd(slug: string): string {
   return fs.existsSync(projectMdPath(slug)) ? fs.readFileSync(projectMdPath(slug), 'utf8') : ''
+}
+
+export function writeProjectMd(slug: string, content: string): void {
+  atomicWrite(projectMdPath(slug), content)
 }
 
 export function readRuntime(slug: string): BTRuntime {
@@ -292,4 +298,28 @@ export function writeDeliverableZip(slug: string, runNo: string, buf: Buffer): v
 export function readDeliverableZip(slug: string, runNo: string): Buffer | null {
   const p = deliverableZipPath(slug, runNo)
   return fs.existsSync(p) ? fs.readFileSync(p) : null
+}
+
+// -- budget.json (project-scoped, cumulative across runs) -------------------------
+// The optional per-project budget (BTBudget) and the cumulative usage it is
+// checked against (BTUsage). Lives at the project root (not per-run) so it
+// persists across runs. An absent file means "no budget, zero usage" (off by
+// default) -- readProjectBudget never throws on a missing/corrupt file.
+
+export function readProjectBudget(slug: string): BTBudgetState {
+  const p = budgetJsonPath(slug)
+  if (!fs.existsSync(p)) return { budget: null, usage: { tokens: 0, wallSeconds: 0 } }
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<BTBudgetState>
+    return {
+      budget: raw.budget ?? null,
+      usage: raw.usage ?? { tokens: 0, wallSeconds: 0 },
+    }
+  } catch {
+    return { budget: null, usage: { tokens: 0, wallSeconds: 0 } }
+  }
+}
+
+export function writeProjectBudget(slug: string, state: BTBudgetState): void {
+  atomicWrite(budgetJsonPath(slug), JSON.stringify(state, null, 2))
 }

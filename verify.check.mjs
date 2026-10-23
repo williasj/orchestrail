@@ -149,5 +149,13 @@ console.log('\nreason format:')
   ok(v.reason.length > 'entry_point_probe:'.length, 'rejection reason carries an actionable detail, not just the token')
 }
 
+
+// -- Regression: the exact record format the prompt mandates must satisfy the gate --
+{
+  const mandated = 'ENTRY-POINT PROBE\ncommand: python implementation.py\nresult: PASS\n- entry_point_invoked: PASS\n- normal_case: PASS\n- boundary_case: PASS'
+  const v = evaluateEntryPointProbe(mandated, true)
+  ok(v.satisfied === true, 'the prompt-mandated probe format (boundary_case: PASS) satisfies the gate', v.reason)
+}
+
 console.log('\n' + (fail === 0 ? 'ALL CHECKS PASSED' : fail + ' CHECK(S) FAILED'))
 process.exit(fail === 0 ? 0 : 1)

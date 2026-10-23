@@ -56,7 +56,10 @@ const FAILURE_RE  = /result\s*:\s*(?:fail|failed)\b|\bTraceback\b|\bexit(?:\s+co
 // A passing outcome: an explicit PASS/PASSED/passed/ok, or an exit-0 signal.
 const PASS_RE     = /\b(PASS|PASSED|passed|ok)\b|\bexit(?:\s+code)?\s*:\s*0\b|\bexit\s+0\b/i
 // A boundary case the unit tests of library functions miss.
-const BOUNDARY_RE = /\b(empty|larg(e|est)|overflow|end[- ]of[- ]input|boundary|boundaries|max(?:imum)?|limit(?:s|ed)?|huge|big)\b/i
+// boundary[_ -]?case matches the exact record format the test-engineer prompt
+// mandates ("- boundary_case: PASS"); \bboundary\b alone never matches it
+// because '_' is a word character.
+const BOUNDARY_RE = /\b(empty|larg(e|est)|overflow|end[- ]of[- ]input|boundary|boundaries|boundary[_ -]?case|max(?:imum)?|limit(?:s|ed)?|huge|big)\b/i
 
 /**
  * An entry-point probe is required only for a CODE task (the `runtimes` slot is

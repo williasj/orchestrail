@@ -296,7 +296,7 @@ function finalizationEscalation(
   // in utils/verify.ts so the gate never trusts model prose.
   const probeVerdict = evaluateEntryPointProbe(
     wbGet(ENTRY_POINT_PROBE_SLOT),
-    entryPointProbeRequired(isCodeTask, !!agent?.requiresVerifiedExecution),
+    entryPointProbeRequired(isCodeTask, !!agent?.requiresVerifiedExecution) && (process.env.ENTRY_POINT_PROBE ?? 'on').toLowerCase() !== 'off',
   )
   if (!probeVerdict.satisfied) reasons.push(probeVerdict.reason)
 
@@ -732,7 +732,14 @@ async function runAgentInner(spec: TaskSpec, generation: number, reasoningEffort
       }
     }
 
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    // One cheap nudge per stage (TERMINAL_NUDGE, default on): a pipeline stage that
+    // stops with plain text instead of calling complete_stage is asked once, in the
+    // same conversation, to signal. Without it the whole stage is re-run as a
+    // no_terminal_signal ESCALATE, which on MoE models roughly doubled run cost.
+    let terminalNudged = false
+    const terminalNudgeOn = (process.env.TERMINAL_NUDGE ?? 'on').toLowerCase() !== 'off'
+    for (let round = 0; round < MAX_TOOL_ROUNDS + 1; round++) {
+      if (round === MAX_TOOL_ROUNDS && !terminalNudged) break
       if (generation !== getGeneration()) {
         console.log(`[abort] ${spec.assignee}:${spec.title} superseded`)
         return { assignee: spec.assignee, title: spec.title, output: '(aborted)', success: false }
@@ -766,6 +773,16 @@ async function runAgentInner(spec: TaskSpec, generation: number, reasoningEffort
 
       // No tool calls -- plain text response
       if (!tool_calls || tool_calls.length === 0) {
+        if (!pipelineCompletion && isPipelineStage && terminalNudgeOn && !terminalNudged) {
+          terminalNudged = true
+          messages.push({ role: 'assistant', content: content ?? '' })
+          messages.push({ role: 'user', content:
+            'You stopped without calling complete_stage. Do not redo any work. If your required outputs are written, '
+            + 'call complete_stage now with status DONE and a one-line summary. If something specific blocks the next '
+            + 'stage, call complete_stage with status ESCALATE and name it. If a required slot is missing, write it first, then call complete_stage.' })
+          console.log(`[nudge] ${spec.assignee}: stopped without complete_stage -- nudging once`)
+          continue
+        }
         // A write-and-stop on a verifiable code stage still gets its captured
         // harness executed before finalization decides DONE vs ESCALATE. When the
         // stage napped and produced no harness at all, one focused re-ask tries to
@@ -866,7 +883,7 @@ async function runAgentInner(spec: TaskSpec, generation: number, reasoningEffort
                 // necessary but not sufficient. The artifact must ALSO be driven
                 // end-to-end the way the requester will use it, with at least one
                 // boundary covered. Verdict from the pure contract in utils/verify.ts.
-                const probe = evaluateEntryPointProbe(wbGet(ENTRY_POINT_PROBE_SLOT), true)
+                const probe = evaluateEntryPointProbe(wbGet(ENTRY_POINT_PROBE_SLOT), (process.env.ENTRY_POINT_PROBE ?? 'on').toLowerCase() !== 'off')
                 if (!probe.satisfied) {
                   completionStatus = 'ESCALATE'
                   escalationReason = probe.reason

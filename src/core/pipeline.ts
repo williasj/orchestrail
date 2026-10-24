@@ -96,6 +96,24 @@ export async function executePipeline(
       let selfCorrection = ''   // feedback for re-running THIS stage after it failed its own contract
       let advanceIdx   = true   // normally advance to stageIdx+1 after inner loop
 
+      // Fail fast: once the implementation stage has run, a later stage with no
+      // implementation to work on only burns tokens (2026-10-23 rate-limiter run:
+      // 1.3M tokens of testing and review on an empty slot). Stop and synthesize,
+      // which marks the run unverified. FAIL_FAST_EMPTY_IMPL=off disables.
+      if ((process.env.FAIL_FAST_EMPTY_IMPL ?? 'on').toLowerCase() !== 'off'
+          && stage.assignee !== 'senior-engineer' && stage.assignee !== 'software-architect'
+          && history.some(h => h.assignee === 'senior-engineer')
+          && !wbGet('implementation')) {
+        console.warn(`[pipeline] no implementation after the implementation stage -- skipping "${stage.name}" and the rest, synthesizing`)
+        callbacks.onMaxRetries(stage)
+        const wbSnapshot: Record<string, string> = {}
+        const _r = wbGet('review_report'); if (_r) wbSnapshot['review_report'] = _r
+        const _t = wbGet('test_report');   if (_t) wbSnapshot['test_report']   = _t
+        wbClear(pipelineId)
+        const totalRewindsF = Object.values(rewindCounts).reduce((a, b) => a + b, 0)
+        return { results: allResults, synthesizeEarly: true, wbSnapshot, rewindCount: totalRewindsF }
+      }
+
       while (true) {
         if (generation !== getGeneration()) return { results: allResults, synthesizeEarly: false, wbSnapshot: {}, rewindCount: 0 }
 
@@ -272,6 +290,12 @@ export async function executePipeline(
               wroteWorkbenchSlot(stageMsgs, 'implementation')) {
             implementationCode = wbGet('implementation') ?? implementationCode
             console.log(`[pipeline] Implementation slot written by the agent (${implementationCode?.length ?? 0} bytes) -- kept as is`)
+          } else if ((stage.name === 'Implementation' || stage.assignee === 'senior-engineer') && wbGet('implementation')) {
+            // The slot already holds an implementation the agent wrote earlier: keep it.
+            // Scraping code blocks or write_file calls here replaced real deliverables
+            // with probe/check scripts (2026-10-23 compose run: entry_probe.py won).
+            implementationCode = wbGet('implementation') ?? implementationCode
+            console.log(`[pipeline] Implementation slot kept (${implementationCode?.length ?? 0} bytes); not scraping stage output`)
           } else if (stage.name === 'Implementation' || stage.assignee === 'senior-engineer') {
             let extractedCode = extractCodeBlock(result.output)
             if (!extractedCode) {
@@ -404,10 +428,15 @@ export async function executePipeline(
         const fixMsgs   = (fixResult as { _messages?: AgenticMessage[] })._messages ?? []
         // Only an agent that may write the implementation can change it; a test-engineer's
         // fix output is full of test code that must never be scraped into that slot.
+        // Scrape only when the slot is empty. A fixer that did not rewrite the slot
+        // leaves the existing implementation in place; its helper scripts (probes,
+        // checks) must never replace the deliverable.
         const fixedCode = !agentCanWriteSlot(escalateTarget, 'implementation') ? null
           : wroteWorkbenchSlot(fixMsgs, 'implementation')
             ? wbGet('implementation')
-            : (extractCodeBlock(fixResult.output) ?? extractCodeFromToolCalls(fixMsgs))
+            : wbGet('implementation')
+              ? null
+              : (extractCodeBlock(fixResult.output) ?? extractCodeFromToolCalls(fixMsgs))
         if (fixedCode) {
           implementationCode = fixedCode
           wbSet('implementation', fixedCode)

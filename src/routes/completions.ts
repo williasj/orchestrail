@@ -141,6 +141,20 @@ function extractGoal(messages: { role: string; content: string }[]): string {
 
 // -- Deps ---------------------------------------------------------------------
 
+
+/** Body of a stage's collapsible details block. A stage that ends with tool calls
+ *  often has no closing text, which left the block empty (Item 18); fall back to
+ *  the stage's completion summary and escalation reason. */
+function stageDetailBody(result: { output?: string; completion?: { status?: string; summary?: string; escalation_reason?: string } }): string {
+  const out = (result.output ?? '').trim()
+  if (out) return out
+  const c = result.completion
+  const parts: string[] = []
+  if (c?.summary) parts.push(`**${c.status ?? 'DONE'}:** ${c.summary}`)
+  if (c?.escalation_reason) parts.push(`**Reason:** ${c.escalation_reason}`)
+  return parts.length ? parts.join('\n\n') : '_(no output recorded for this stage)_'
+}
+
 export interface CompletionsDeps {
   /** Per-request usage accumulator — run() wraps each request. */
   usageStorage:     AsyncLocalStorage<UsageTotals>
@@ -413,7 +427,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
                 const icon = status === 'escalate' ? '⚠' : '✓'
                 const cost = costSuffix(result)
                 sendChunk(`> **[done]** ${stage.assignee}: ${stage.name} ${icon}${cost}\n`)
-                sendChunk(`\n<details>\n<summary>${stage.assignee} — ${stage.name}${status === 'escalate' ? ' ⚠' : ''}</summary>\n\n${result.output}\n\n</details>\n`)
+                sendChunk(`\n<details>\n<summary>${stage.assignee} — ${stage.name}${status === 'escalate' ? ' ⚠' : ''}</summary>\n\n${stageDetailBody(result)}\n\n</details>\n`)
               },
               onFixStart:  (_stage, fixAgent, reason) => { sendChunk(`> **[${fixAgent}]** fixing ${_stage.name}: ${reason.slice(0, 80)}...\n`) },
               onFixDone:   (fixAgent) => { sendChunk(`> **[done]** ${fixAgent}: fix applied\n`) },
@@ -691,7 +705,7 @@ export function registerCompletionsRoutes(router: Router, deps: CompletionsDeps)
               const icon = status === 'escalate' ? '⚠' : '✓'
               const cost = costSuffix(result)
               sendChunk(`> **[done]** ${stage.assignee}: ${stage.name} ${icon}${cost}\n`)
-              sendChunk(`\n<details>\n<summary>${stage.assignee} — ${stage.name}${status === 'escalate' ? ' ⚠' : ''}</summary>\n\n${result.output}\n\n</details>\n`)
+              sendChunk(`\n<details>\n<summary>${stage.assignee} — ${stage.name}${status === 'escalate' ? ' ⚠' : ''}</summary>\n\n${stageDetailBody(result)}\n\n</details>\n`)
             },
             onFixStart:  (_stage, fixAgent, reason) => { sendChunk(`> **[${fixAgent}]** fixing ${_stage.name}: ${reason.slice(0, 80)}...\n`) },
             onFixDone:   (fixAgent) => { sendChunk(`> **[done]** ${fixAgent}: fix applied\n`) },

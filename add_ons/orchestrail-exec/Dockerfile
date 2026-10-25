@@ -38,8 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         rustc cargo \
     && rm -rf /var/lib/apt/lists/*
 
-# -- Node 20 LTS + global JS/TS tooling ---------------------------------------
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# -- Node 22 LTS + global JS/TS tooling ---------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g --no-fund --no-audit typescript tsx eslint prettier \
